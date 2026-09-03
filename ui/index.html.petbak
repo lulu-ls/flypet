@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>FlyPet</title>
+<style>
+  html, body {
+    margin: 0; padding: 0;
+    width: 100vw; height: 100vh;
+    background: #2a2f36;
+    overflow: hidden;
+    user-select: none;
+    cursor: default;
+  }
+  canvas { position: fixed; left: 0; top: 0; }
+</style>
+</head>
+<body>
+  <canvas id="view"></canvas>
+  <div id="boot" style="position:fixed;bottom:2px;left:2px;font:9px monospace;color:#8ff;z-index:99;background:#000a">boot</div>
+  <script type="module" src="pet.js"></script>
+</body>
+</html>

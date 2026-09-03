@@ -1,0 +1,445 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>行为实验室 · 真实感对比</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin:0; padding:24px; background:#101216; color:#d8dde4;
+         font:13px/1.5 -apple-system,"PingFang SC",sans-serif; }
+  h1 { font-size:16px; margin:0 0 4px; font-weight:600; }
+  .sub { color:#7d8794; font-size:12px; margin-bottom:14px; }
+  .bar { display:flex; gap:10px; align-items:center; margin-bottom:14px; flex-wrap:wrap; }
+  button { background:#3d6fd8; color:#fff; border:0; padding:8px 14px;
+           border-radius:7px; cursor:pointer; font-size:13px; }
+  button:hover { background:#4a7fe8; }
+  .tip { color:#6d7683; font-size:11px; max-width:420px; }
+  .stages { display:flex; gap:18px; flex-wrap:wrap; }
+  .box { background:#171a1f; border:1px solid #2c313a; border-radius:12px; padding:10px; }
+  .tag { font-size:11px; color:#8b95a3; margin-bottom:8px; }
+  canvas.stage { display:block; background:linear-gradient(145deg,#23262c,#15171b);
+                 border-radius:8px; cursor:crosshair; }
+  .stat { font-size:11px; color:#79838f; margin-top:7px; font-variant-numeric:tabular-nums;
+          min-height:16px; }
+  .sec { margin-top:18px; }
+  .sec h3 { font-size:11px; color:#8b95a3; margin:0 0 8px; font-weight:600; letter-spacing:.5px; }
+</style>
+</head>
+<body>
+<h1>行为实验室 · 真实感对比</h1>
+<div class="sub">同一只苍蝇 · 同一渲染器 · 只换行为引擎 —— 真实感主要来自动作，不是外观 · <b id="rver">渲染器 r7 · 外观参数在 LOOK 区可调</b></div>
+<div class="bar">
+  <button id="swoop">快速扑近（0.4s）</button>
+  <button id="creep">慢速靠近（3.2s，70px 处停住）</button>
+  <span class="tip">或直接把鼠标移进场地。观察差异：v2 一律直线惊飞；v3 分级响应（容忍 / 挪开 / 之字逃逸），起飞前有小跳，落地会过冲，闲时搓腿刷翅踱步</span>
+</div>
+<div class="stages">
+  <div class="box">
+    <div class="tag">v2 现行引擎：直线插值 · 固定 96px 警戒 · 无起降细节</div>
+    <canvas id="cvA" class="stage" width="460" height="440"></canvas>
+    <div class="stat" id="statA"></div>
+  </div>
+  <div class="box">
+    <div class="tag">v3 真实引擎：噪声游走+急转 · 威胁分级 · 起跳/着陆细节 · 理毛行为</div>
+    <canvas id="cvB" class="stage" width="460" height="440"></canvas>
+    <div class="stat" id="statB"></div>
+  </div>
+  <div class="box">
+    <div class="tag">外观放大镜（同一只 · 左栖息收翅 / 右飞行展翅）</div>
+    <div style="display:flex; gap:8px">
+      <canvas id="zoomP" width="170" height="170" style="background:linear-gradient(145deg,#23262c,#15171b);border-radius:8px"></canvas>
+      <canvas id="zoomF" width="170" height="170" style="background:linear-gradient(145deg,#23262c,#15171b);border-radius:8px"></canvas>
+    </div>
+    <div class="stat" id="statZoom">调 render.js 后强刷（Cmd+Shift+R）即可见</div>
+  </div>
+</div>
+
+<div class="sec">
+  <h3>尺寸对比（小即是真：桌面真实苍蝇约 24-32px）</h3>
+  <canvas id="sizes" width="460" height="80"></canvas>
+</div>
+
+<script src="../ui/render.js"></script>
+<script>
+/* ======================= 外观调参区（改这里即可，实时生效） =======================
+   本页的苍蝇 = render.js 的画法 + 下面这套参数。
+   想调外观只改下面的数字，不用去动 render.js。
+   ============================================================================ */
+const LOOK = {
+  // —— 翅膀 ——
+  wingW:      [.62, .70],   // 翅宽（占翅长比例）：越大越宽
+  wingLen:    [1.02, 1.16], // 翅长
+  wingAlpha:  [.34, .46],   // 翅透明度：越大越不透明
+  wingStyle:  'slim',       // 'slim' = 直角三角形（蝇）；'round' = 圆弧（蝶/蜂）
+  // —— 体色 ——
+  hue:        [195, 210],   // 色相：195 冷石蓝 / 30 暖黄
+  sat:        [.10, .18],   // 饱和度：越大越艳
+  light:      [.20, .30],   // 明度：越大越浅
+  gloss:      [.62, .80],   // 甲壳光泽
+  fuzz:       [.55, .85],   // 刚毛密度
+  // —— 形态 ——
+  bodyLen:    [.78, .88],   // 腹长
+  bodyW:      [.98, 1.12],  // 体宽：越大越胖
+  eyeSize:    [1.08, 1.22], // 复眼大小
+  antennaLen: [.30, .42],   // 触角长度
+  legLen:     [1.05, 1.25], // 足长
+  pattern:    'bands',      // 'bands' 横带（蝇）/ 'stripe' 纵纹 / 'spot' 斑点 / 'none'
+};
+
+// 把 LOOK 注入物种模板，再生成个体
+(function applyLook() {
+  const t = SPECIES.fly;
+  for (const k in LOOK) t[k] = LOOK[k];
+})();
+
+/* ======================= 公共 ======================= */
+const TAU = Math.PI * 2;
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const lerpV = (a, b, t) => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+const d2 = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+const dirFrom = (a, b) => { const d = d2(a, b) || 1; return { x: (b.x - a.x) / d, y: (b.y - a.y) / d }; };
+const randDir = () => { const a = Math.random() * TAU; return { x: Math.cos(a), y: Math.sin(a) }; };
+function lerpAngle(a, b, t) { let d = ((b - a + Math.PI) % TAU + TAU) % TAU - Math.PI; return a + d * t; }
+function nearestUpright(r) { return r - Math.round(r / TAU) * TAU; }
+
+// 同一个体：两侧行为不同，外观完全相同（去词条，保持素虫）
+const SEED = 20260831;
+const G = (() => {
+  const g = makeGenome(SEED, 'fly', 3);
+  g.traits = [];                       // 素虫：不带词条特效
+  applyTraitEffects(g);
+  return g;
+})();
+const SIZE = 30;
+
+/* ======================= 场地：光标跟踪 + 合成光标 ======================= */
+function Stage(cv) {
+  const st = { cv, ctx: cv.getContext('2d'), mouse: null, closing: 0, prevD: 1e9,
+               syn: null, lastM: null, lastT: 0, fly: null };
+  cv.addEventListener('mousemove', e => {
+    const r = cv.getBoundingClientRect();
+    const p = { x: (e.clientX - r.left) * (cv.width / r.width),
+                y: (e.clientY - r.top) * (cv.height / r.height) };
+    const now = performance.now();
+    if (st.lastM && st.lastT) {
+      const dt = (now - st.lastT) / 1000;
+      if (dt > 0) {
+        // 合成光标活动期间不计真实鼠标速度（避免污染 closing）
+        if (!st.syn) {
+          const vx = (p.x - st.lastM.x) / dt, vy = (p.y - st.lastM.y) / dt;
+          st.mvx = st.mvx * .5 + vx * .5; st.mvy = st.mvy * .5 + vy * .5;
+        }
+      }
+    }
+    st.lastM = p; st.lastT = now; st.mouse = p;
+  });
+  st.cursor = () => st.syn ? st.syn.pos : (st.mouse || { x: 230, y: 220 });
+  // 合成光标：swoop 快速扑到虫身上；creep 慢速逼近、在 70px 处停住
+  st.launchSyn = (mode) => {
+    const fly = st.fly.pos, corner = { x: 20, y: 20 };
+    let end;
+    if (mode === 'swoop') end = { ...fly };
+    else { const d = dirFrom(fly, corner); end = { x: fly.x + d.x * 70, y: fly.y + d.y * 70 }; }
+    st.syn = { mode, from: corner, end, t: 0, dur: mode === 'swoop' ? .38 : 3.2,
+               hold: mode === 'swoop' ? .6 : 1.4, phase: 0, pos: { ...corner } };
+  };
+  st.stepSyn = (dt) => {
+    const s = st.syn; if (!s) return;
+    s.t += dt;
+    if (s.phase === 0) {
+      const k = Math.min(1, s.t / s.dur);
+      s.pos = lerpV(s.from, s.end, k);
+      if (k >= 1) { s.phase = 1; s.t = 0; }
+    } else if (s.t >= s.hold) { st.syn = null; }
+  };
+  return st;
+}
+
+/* ======================= v2 引擎（现行 Rust 逻辑移植） ======================= */
+function V2(st) {
+  const v = { pos: { x: 230, y: 225 }, state: 'perch', from: null, to: null, t: 0, dur: 1,
+              cd: 0, idle: 0, limit: 8 + Math.random() * 8, speed: 300, facing: 1 };
+  v.update = (dt, cur) => {
+    v.cd = Math.max(0, v.cd - dt);
+    if (v.state === 'fly') {
+      v.t = Math.min(1, v.t + dt / v.dur);
+      const e = 1 - Math.pow(1 - v.t, 2);          // easeOutQuad 直线插值
+      v.pos = lerpV(v.from, v.to, e);
+      if (v.t >= 1) { v.state = 'perch'; v.cd = .3; v.idle = 0; v.limit = 8 + Math.random() * 12; }
+    } else {
+      v.idle += dt;
+      const d = d2(v.pos, cur);
+      if ((d < 96 && v.cd <= 0) || v.idle >= v.limit) v.takeoff(cur, d < 96 && v.cd <= 0);
+    }
+  };
+  v.takeoff = (cur, scared) => {
+    const away = scared ? dirFrom(cur, v.pos) : randDir();
+    const dist = 150 + Math.random() * 140;
+    let a = Math.atan2(away.y, away.x) + (Math.random() - .5);
+    let to = null;
+    for (let i = 0; i < 16; i++) {
+      const c = { x: v.pos.x + Math.cos(a) * dist, y: v.pos.y + Math.sin(a) * dist };
+      if (c.x > 26 && c.x < 434 && c.y > 26 && c.y < 414) { to = c; break; } a += .4;
+    }
+    to = to || { x: 230, y: 220 };
+    v.from = { ...v.pos }; v.to = to;
+    v.dur = Math.max(.12, d2(v.from, to) / (v.speed * (scared ? 1.4 : 1)));
+    v.t = 0; v.state = 'fly';
+    if (Math.abs(to.x - v.from.x) > 2) v.facing = to.x > v.from.x ? 1 : -1;
+  };
+  st.fly = v; return v;
+}
+
+/* ======================= v3 真实引擎 ======================= */
+function V3(st) {
+  const ph = [Math.random() * TAU, Math.random() * TAU, Math.random() * TAU];
+  const noise = t => Math.sin(t * 2.1 + ph[0]) + .6 * Math.sin(t * 4.7 + ph[1]) + .35 * Math.sin(t * 9.3 + ph[2]);
+  const WALK = 55, BURST = 520, CRUISE = 200;
+
+  const v = { pos: { x: 230, y: 225 }, vel: { x: 0, y: 0 }, heading: Math.random() * TAU,
+              rot: 0, alt: 0, state: 'perch', t: 0, facing: 1, burst: 0, dartT: .4,
+              idleT: 1.4, groomEnd: 0, groomPhase: 0, walkTgt: null, walkT: 0, flickT: 0,
+              target: null, landPhase: 0, landFrom: null, over: null, speedVis: 0 };
+
+  v.pickTarget = () => ({ x: 50 + Math.random() * 360, y: 50 + Math.random() * 340 });
+
+  v.startGroom = d => { v.state = 'groom'; v.t = 0; v.groomEnd = d; v.groomPhase = 0; };
+
+  v.startWalk = cur => {
+    let a;
+    if (cur) { const w = dirFrom(cur, v.pos); a = Math.atan2(w.y, w.x) + (Math.random() - .5) * .9; }
+    else a = Math.random() * TAU;
+    const dist = 10 + Math.random() * 22;
+    v.walkTgt = { x: clamp(v.pos.x + Math.cos(a) * dist, 24, 436),
+                  y: clamp(v.pos.y + Math.sin(a) * dist, 24, 416) };
+    v.state = 'walk'; v.t = 0; v.walkT = 0;
+  };
+
+  v.takeoff = (cur, scared) => {
+    v.state = 'takeoff'; v.t = 0;
+    let a;
+    if (scared && cur) { const w = dirFrom(cur, v.pos); a = Math.atan2(w.y, w.x) + (Math.random() - .5) * 1.3; }
+    else a = Math.random() * TAU;
+    v.heading = a;
+    v.target = v.pickTarget();
+    if (scared) { // 惊飞落点偏向远离光标
+      const bias = { x: v.pos.x + Math.cos(a) * 200, y: v.pos.y + Math.sin(a) * 200 };
+      v.target = { x: clamp(v.target.x * .45 + bias.x * .55, 24, 436),
+                   y: clamp(v.target.y * .45 + bias.y * .55, 24, 416) };
+    }
+  };
+
+  v.startLand = () => {
+    v.state = 'land'; v.t = 0; v.landPhase = 0; v.landFrom = { ...v.pos };
+    const w = dirFrom(v.pos, v.target);
+    v.over = { x: clamp(v.pos.x + w.x * 15, 20, 440), y: clamp(v.pos.y + w.y * 15, 20, 420) };
+  };
+
+  v.update = (dt, cur, closing) => {
+    v.t += dt; v.flickT = Math.max(0, v.flickT - dt);
+    const d = d2(v.pos, cur);
+
+    switch (v.state) {
+      case 'perch': case 'groom': {
+        if (v.state === 'groom') {
+          v.groomPhase += dt;
+          if (v.t >= v.groomEnd) { v.state = 'perch'; v.idleT = .8 + Math.random() * 1.6; }
+        }
+        // ---- 威胁分级：快速逼近 > 接触 > 慢速靠近（挪开） ----
+        if ((closing > 280 && d < 160) || d < 30) { v.takeoff(cur, true); break; }
+        if (d < 105 && closing > 120) { v.startWalk(cur); break; }
+        if (v.state === 'perch') {
+          // ---- 闲置行为调度 ----
+          v.idleT -= dt;
+          if (v.idleT <= 0) {
+            const r = Math.random();
+            if (r < .40) v.idleT = 1 + Math.random() * 2.5;         // 发呆
+            else if (r < .62) v.startGroom(1.1 + Math.random() * 1.2); // 搓腿
+            else if (r < .75) { v.flickT = .22; v.idleT = 1 + Math.random() * 2; } // 刷翅
+            else if (r < .90) v.startWalk(null);                    // 踱步
+            else { v.facing *= -1; v.idleT = 1.5 + Math.random() * 2.5; }      // 转身
+          }
+          if (Math.random() < dt / 9) v.takeoff(null, false);       // 自发挪窝
+        }
+        break;
+      }
+      case 'walk': {
+        v.walkT += dt;
+        if (d2(v.pos, v.walkTgt) < 2 || v.walkT > 3) { v.state = 'perch'; v.idleT = .8 + Math.random() * 2; break; }
+        const w = dirFrom(v.pos, v.walkTgt);
+        v.pos.x += w.x * WALK * dt; v.pos.y += w.y * WALK * dt;
+        if (Math.abs(w.x) > .08) v.facing = w.x > 0 ? 1 : -1;
+        const dN = d2(v.pos, cur);
+        if ((closing > 280 && dN < 160) || dN < 30) v.takeoff(cur, true);
+        break;
+      }
+      case 'takeoff': { // 起跳小跳
+        v.alt = Math.sin(Math.min(1, v.t / .1) * Math.PI) * 7;
+        if (v.t >= .1) { v.state = 'fly'; v.t = 0; v.burst = 1; v.dartT = .15 + Math.random() * .2; }
+        break;
+      }
+      case 'fly': {
+        // 突发急转（dart）
+        v.dartT -= dt;
+        if (v.dartT <= 0) { v.dartT = .18 + Math.random() * .35; v.heading += (Math.random() - .5) * 2.4; v.burst = Math.max(v.burst, .85); }
+        // 空中规避：光标快速逼近
+        if (d < 95 && closing > 200) {
+          const w = dirFrom(cur, v.pos);
+          v.heading = Math.atan2(w.y, w.x) + (Math.random() - .5) * 1.5;
+          v.burst = 1.15; v.dartT = .25;
+        }
+        // 噪声游走
+        v.heading += noise(v.t) * 1.5 * dt;
+        v.burst *= Math.exp(-2.1 * dt);
+        // 缓慢收敛到落点
+        const w = dirFrom(v.pos, v.target);
+        v.heading = lerpAngle(v.heading, Math.atan2(w.y, w.x), Math.min(1, dt * (6.5 - 4.5 * Math.min(1, v.burst))));
+        const sp = CRUISE + (BURST - CRUISE) * Math.min(1, v.burst);
+        v.vel = { x: Math.cos(v.heading) * sp, y: Math.sin(v.heading) * sp };
+        v.pos.x += v.vel.x * dt; v.pos.y += v.vel.y * dt;
+        v.speedVis = sp;
+        // 撞墙反弹
+        if (v.pos.x < 18 || v.pos.x > 442) { v.heading = Math.PI - v.heading; v.pos.x = clamp(v.pos.x, 18, 442); v.target = v.pickTarget(); }
+        if (v.pos.y < 18 || v.pos.y > 422) { v.heading = -v.heading; v.pos.y = clamp(v.pos.y, 18, 422); v.target = v.pickTarget(); }
+        if (d2(v.pos, v.target) < 24 || v.t > 3.5) v.startLand();
+        break;
+      }
+      case 'land': { // 着陆：过冲 → 回落
+        if (v.landPhase === 0) {
+          const k = Math.min(1, v.t / .2); const e = 1 - Math.pow(1 - k, 2);
+          v.pos = lerpV(v.landFrom, v.over, e);
+          v.alt = 6 * (1 - k);
+          if (k >= 1) { v.landPhase = 1; v.t = 0; }
+        } else {
+          const k = Math.min(1, v.t / .18); const e = k * k * (3 - 2 * k);
+          v.pos = lerpV(v.over, v.target, e);
+          v.alt = 0;
+          if (k >= 1) {
+            v.pos = { ...v.target }; v.state = 'perch';
+            v.idleT = .3 + Math.random() * .9; v.rot = 0;
+            if (Math.random() < .35) v.startGroom(.8 + Math.random() * .9); // 落地理毛
+          }
+        }
+        break;
+      }
+    }
+  };
+  st.fly = v; return v;
+}
+
+// 身体朝向平滑：飞行时头指向运动方向，其余回正
+function smoothRot(v, dt) {
+  let tgt = 0;
+  if (v.state === 'fly' || (v.state === 'land' && v.landPhase === 0)) tgt = v.heading + Math.PI / 2;
+  else tgt = nearestUpright(v.rot);
+  v.rot = lerpAngle(v.rot, tgt, 1 - Math.exp(-10 * dt));
+}
+
+/* ======================= 主循环 ======================= */
+const cvA = document.getElementById('cvA'), cvB = document.getElementById('cvB');
+const stA = Stage(cvA), stB = Stage(cvB);
+V2(stA); V3(stB);
+
+let prev = performance.now(), animT = 0, statTick = 0;
+function frame(now) {
+  const dt = Math.min(.05, (now - prev) / 1000); prev = now; animT += dt;
+
+  for (const st of [stA, stB]) {
+    st.stepSyn(dt);
+    const dNow = d2(st.fly.pos, st.cursor());
+    const inst = (st.prevD - dNow) / dt;               // 闭合速度（正=在接近）
+    st.closing = st.closing * .55 + Math.max(0, inst) * .45;
+    st.prevD = dNow;
+  }
+
+  stA.fly.update(dt, stA.cursor());
+  stB.fly.update(dt, stB.cursor(), stB.closing);
+  smoothRot(stB.fly, dt);
+  if (stB.fly.state === 'fly') stB.fly.alt = 4.5 + Math.sin(animT * 7) * 2; // 悬停起伏
+
+  draw(stA, false); draw(stB, true);
+  drawZoom();
+  if (++statTick % 6 === 0) stats();
+  requestAnimationFrame(frame);
+}
+
+// 外观放大镜：与场地同一 genome，栖息/飞行两姿态大图
+const zp = document.getElementById('zoomP').getContext('2d');
+const zf = document.getElementById('zoomF').getContext('2d');
+function drawZoom() {
+  zp.clearRect(0, 0, 170, 170);
+  zf.clearRect(0, 0, 170, 170);
+  drawInsect(zp, G, animT, 170, false, 1, null);   // 栖息：收翅
+  drawInsect(zf, G, animT, 170, true, 1, null);    // 飞行：展翅
+}
+
+// 运行错误直接显示在放大镜面板（headless 调试用）
+window.onerror = (msg, src, line) => {
+  document.getElementById('statZoom').textContent = 'ERR: ' + msg + ' @' + line;
+};
+
+// 启动先同步画一帧：即使 headless rAF 不触发也能看到静态画面
+draw(stA, false); draw(stB, true); drawZoom();
+
+function draw(st, isV3) {
+  const ctx = st.ctx, v = st.fly;
+  ctx.clearRect(0, 0, 460, 440);
+
+  const flying = isV3 ? (v.state === 'fly' || v.state === 'takeoff' || v.flickT > 0)
+                      : (v.state === 'fly');
+  const facing = isV3 ? ((v.state === 'fly' || v.state === 'land' || v.state === 'takeoff') ? 1 : v.facing)
+                      : v.facing;
+  const extra = isV3 ? {
+    rot: Math.abs(v.rot) > .01 ? v.rot : 0,
+    alt: v.alt,
+    legMode: v.state === 'walk' ? 'walk' : (v.state === 'groom' ? 'groom' : null),
+    legPhase: v.state === 'walk' ? v.walkT : v.groomPhase
+  } : null;
+
+  ctx.save();
+  ctx.translate(v.pos.x - SIZE / 2, v.pos.y - SIZE / 2);
+  drawInsect(ctx, G, animT, SIZE, flying, facing, extra);
+  ctx.restore();
+
+  if (st.syn) { // 合成光标（准星）
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,120,90,.9)'; ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.arc(st.syn.pos.x, st.syn.pos.y, 6, 0, TAU); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(st.syn.pos.x - 11, st.syn.pos.y); ctx.lineTo(st.syn.pos.x - 3, st.syn.pos.y);
+    ctx.moveTo(st.syn.pos.x + 3, st.syn.pos.y); ctx.lineTo(st.syn.pos.x + 11, st.syn.pos.y);
+    ctx.moveTo(st.syn.pos.x, st.syn.pos.y - 11); ctx.lineTo(st.syn.pos.x, st.syn.pos.y - 3);
+    ctx.moveTo(st.syn.pos.x, st.syn.pos.y + 3); ctx.lineTo(st.syn.pos.x, st.syn.pos.y + 11);
+    ctx.stroke(); ctx.restore();
+  }
+}
+
+function stats() {
+  const f1 = stA.fly, f2 = stB.fly;
+  document.getElementById('statA').textContent =
+    `状态 ${f1.state} · 距光标 ${Math.round(d2(f1.pos, stA.cursor()))}px · 闭合速度 ${Math.round(stA.closing)}px/s`;
+  document.getElementById('statB').textContent =
+    `状态 ${f2.state} · 速度 ${Math.round(f2.speedVis || 0)}px/s · 距光标 ${Math.round(d2(f2.pos, stB.cursor()))}px · 闭合速度 ${Math.round(stB.closing)}px/s`;
+}
+
+/* ======================= 尺寸对比条 ======================= */
+(function () {
+  const cv = document.getElementById('sizes'), c = cv.getContext('2d');
+  [[48, '48px'], [34, '34px'], [26, '26px'], [20, '20px']].forEach(([sz, label], i) => {
+    const x = 30 + i * 115, y = 38;
+    c.save(); c.translate(x - sz / 2, y - sz / 2);
+    drawInsect(c, G, 1.2, sz, false, 1, null);
+    c.restore();
+    c.fillStyle = '#6d7683'; c.font = '10px sans-serif'; c.textAlign = 'center';
+    c.fillText(label, x, 72);
+  });
+})();
+
+/* ======================= 按钮 ======================= */
+document.getElementById('swoop').onclick = () => { stA.launchSyn('swoop'); stB.launchSyn('swoop'); };
+document.getElementById('creep').onclick = () => { stA.launchSyn('creep'); stB.launchSyn('creep'); };
+
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>FlyPet 面板</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    font: 13px/1.5 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: linear-gradient(180deg, #f7f5ef 0%, #efe9dc 100%);
+    color: #3a352c;
+    height: 100vh; overflow: hidden;
+    user-select: none;
+  }
+  .header {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px 6px;
+  }
+  .header .title { font-weight: 700; font-size: 15px; letter-spacing: 1px; }
+  .header .species { font-size: 12px; color: #8a8174; }
+  .pet-stage {
+    position: relative;
+    height: 277px;
+    display: flex; align-items: flex-end; justify-content: center;
+    background: radial-gradient(ellipse at 50% 80%, rgba(255,246,214,.85) 0%, rgba(255,246,214,0) 70%);
+    overflow: hidden;
+  }
+  .pet-stage canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+  .stage-label {
+    position: absolute; top: 6px; right: 10px;
+    font-size: 11px; color: #a8997e;
+    background: rgba(255,255,255,.6); border-radius: 8px; padding: 1px 8px;
+    pointer-events: none;
+  }
+  .stats {
+    display: grid; grid-template-columns: 1fr 1fr 1fr;
+    gap: 1px; background: #ddd6c6;
+    border-top: 1px solid #ddd6c6; margin: 0 12px; border-radius: 10px; overflow: hidden;
+  }
+  .stat {
+    background: #fbf8f1; text-align: center; padding: 8px 2px;
+  }
+  .stat .num { font-size: 18px; font-weight: 700; color: #4a4436; }
+  .stat .lbl { font-size: 11px; color: #9a917f; margin-top: 1px; }
+  .stat .lv { font-size: 10px; color: #c79a1e; font-weight: 600; margin-top: 1px; }
+  .item-card {
+    margin: 12px;
+    background: #fffdf7; border: 1px solid #e8e1d2; border-radius: 10px;
+    padding: 10px 12px; display: flex; align-items: center; gap: 10px;
+    min-height: 44px;
+  }
+  .item-card .ico { font-size: 20px; }
+  .item-card .txt { flex: 1; }
+  .item-card .txt .nm { font-weight: 600; font-size: 13px; }
+  .item-card .txt .sub { font-size: 11px; color: #a89c86; }
+  .rarity-fan { color: #8f979c; } .rarity-ling { color: #3fa15c; }
+  .rarity-xuan { color: #3d7fb8; } .rarity-di { color: #8a4fc0; }
+  .rarity-tian { color: #c79a1e; } .rarity-xian { color: #9aa7c9; }
+  .rarity-shen { color: #d4a017; text-shadow: 0 0 6px rgba(212,160,23,.5); }
+  .actions { display: flex; gap: 10px; margin: 12px; }
+  .btn {
+    flex: 1; border: none; border-radius: 10px;
+    padding: 11px 0; font-size: 14px; font-weight: 600;
+    cursor: pointer; transition: transform .05s;
+  }
+  .btn:active { transform: scale(.97); }
+  .btn-feed { background: linear-gradient(180deg, #f6c453, #e8a33d); color: #fff; }
+  .btn-feed:hover { filter: brightness(1.05); }
+  .msg {
+    margin: 0 12px 10px; text-align: center; min-height: 18px;
+    font-size: 12px; color: #7d735f; opacity: 0; transition: opacity .3s;
+  }
+  .msg.show { opacity: 1; }
+</style>
+</head>
+<body>
+  <div class="header">
+    <div class="title">🦋 FlyPet</div>
+    <div class="species" id="speciesName">蝴蝶</div>
+  </div>
+
+  <div class="pet-stage">
+    <canvas id="pet"></canvas>
+    <div class="stage-label">待机中</div>
+  </div>
+
+  <div class="stats">
+    <div class="stat">
+      <div class="num" id="affinity">0</div>
+      <div class="lbl">亲密度</div>
+      <div class="lv" id="affinityLv">Lv.1</div>
+    </div>
+    <div class="stat"><div class="num" id="fedCount">0</div><div class="lbl">喂食次数</div></div>
+    <div class="stat"><div class="num" id="interactCount">0</div><div class="lbl">互动次数</div></div>
+  </div>
+
+  <div class="item-card" id="itemCard">
+    <div class="ico">🍯</div>
+    <div class="txt">
+      <div class="nm" id="itemName">尚未喂食</div>
+      <div class="sub" id="itemRarity">喂食后这里显示获得的道具</div>
+    </div>
+  </div>
+
+  <div class="actions">
+    <button class="btn btn-feed" id="btnFeed">🍽️ 投喂</button>
+  </div>
+
+  <div class="msg" id="msg"></div>
+
+  <script type="module" src="main.js"></script>
+</body>
+</html>

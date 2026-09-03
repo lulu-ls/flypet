@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "FlyPet demo permissions",
+  "windows": ["insect", "feed-anim", "main"],
+  "permissions": ["core:default"]
+}

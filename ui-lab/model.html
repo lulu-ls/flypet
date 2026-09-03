@@ -1,0 +1,567 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>GLB 模型 · 程序化动画驱动</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin:0; padding:20px; background:#101216; color:#d8dde4;
+         font:13px/1.5 -apple-system,"PingFang SC",sans-serif; }
+  h1 { font-size:16px; margin:0 0 4px; font-weight:600; }
+  .sub { color:#7d8794; font-size:12px; margin-bottom:14px; }
+  .wrap { display:flex; gap:18px; align-items:flex-start; flex-wrap:wrap; }
+  .pane { background:#171a1f; border:1px solid #2c313a; border-radius:12px; padding:10px; }
+  canvas#view { display:block; background:linear-gradient(145deg,#23262c,#15171b); border-radius:8px; }
+  .side { min-width:250px; }
+  .row { margin-bottom:12px; }
+  label { display:block; font-size:11px; color:#8b95a3; margin-bottom:5px; letter-spacing:.3px; }
+  select, input[type=range] { width:100%; }
+  select { background:#22262d; color:#d8dde4; border:1px solid #3a4150;
+           padding:6px 8px; border-radius:6px; font-size:12px; }
+  button { background:#3d6fd8; color:#fff; border:0; padding:7px 12px;
+           border-radius:6px; cursor:pointer; font-size:12px; }
+  button:hover { background:#4a7fe8; }
+  button.ghost { background:#2a2f38; border:1px solid #3a4150; }
+  .chips { display:flex; gap:5px; flex-wrap:wrap; }
+  .chip { flex:1; text-align:center; padding:5px 6px; border-radius:6px; cursor:pointer;
+          background:#22262d; border:1px solid #333944; font-size:11px; color:#98a2b0; }
+  .chip.on { background:#3d6fd8; color:#fff; border-color:#3d6fd8; }
+  .drop { border:2px dashed #3a4150; border-radius:8px; padding:14px; text-align:center;
+          color:#79838f; font-size:11px; line-height:1.7; }
+  .drop.over { border-color:#3d6fd8; color:#6ba5f0; }
+  .info { font-size:11px; color:#79838f; line-height:1.8; margin-top:8px; }
+  .info b { color:#c6cdd6; }
+  .stat { font-size:11px; color:#79838f; font-variant-numeric:tabular-nums; }
+</style>
+</head>
+<body>
+<h1>GLB 模型 · 程序化动画驱动</h1>
+<div class="sub">不用做动画 —— 姿态、振翅、搓手、爬行全部由代码驱动 · 拖入 .glb 即可替换内置替代模型</div>
+
+<div class="wrap">
+  <div class="pane">
+    <canvas id="view" width="440" height="440"></canvas>
+    <div class="stat" id="stat">—</div>
+  </div>
+
+  <div class="side">
+    <div class="pane">
+      <div class="drop" id="drop">
+        把 <b>.glb</b> 拖到这里临时预览<br>
+        <span style="font-size:10px">正式存放位置：<b>ui/models/fly.glb</b><br>
+        （放好后刷新自动加载 · lab 与打包共用同一份）</span>
+      </div>
+      <div class="info" id="bindInfo"></div>
+    </div>
+
+    <div class="pane" style="margin-top:12px">
+      <div class="row">
+        <label>姿态（手动）</label>
+        <div class="chips" id="poses">
+          <div class="chip" data-p="perch">待机</div>
+          <div class="chip" data-p="fly">飞行</div>
+          <div class="chip" data-p="glide">滑行</div>
+          <div class="chip" data-p="groom">搓手</div>
+          <div class="chip" data-p="walk">爬行</div>
+        </div>
+      </div>
+      <div class="row">
+        <label>视角</label>
+        <div class="chips" id="views">
+          <div class="chip on" data-v="top">顶视</div>
+          <div class="chip" data-v="tilt">斜视</div>
+          <div class="chip" data-v="side">侧视</div>
+        </div>
+      </div>
+      <div class="row">
+        <label>振翅频率 <span id="fqVal">200</span> Hz</label>
+        <input type="range" id="flapHz" min="40" max="260" value="200">
+      </div>
+      <div class="row">
+        <label>振翅幅度 <span id="faVal">38</span>°</label>
+        <input type="range" id="flapAmp" min="10" max="70" value="38">
+      </div>
+      <button id="auto" class="ghost">自动行为：开</button>
+    </div>
+  </div>
+</div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+} }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+/* ======================= 1. 场景 ======================= */
+const cv = document.getElementById('view');
+const renderer = new THREE.WebGLRenderer({ canvas: cv, alpha: true, antialias: true });
+renderer.setPixelRatio(Math.min(2, devicePixelRatio));
+renderer.setSize(440, 440, false);
+renderer.setClearColor(0x000000, 0);
+
+const scene = new THREE.Scene();
+const cam = new THREE.PerspectiveCamera(28, 1, 0.1, 100);
+const VIEWS = {
+  top:  { pos: [0, 6.2, 0.01], look: [0, 0, 0] },
+  tilt: { pos: [0, 4.6, 3.4],  look: [0, 0, 0] },
+  side: { pos: [6.0, 0.6, 0.0], look: [0, 0, 0] }
+};
+function setView(v) {
+  const c = VIEWS[v];
+  cam.position.set(...c.pos); cam.lookAt(...c.look);
+}
+setView('top');
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x223344, 1.5));
+const key = new THREE.DirectionalLight(0xffffff, 1.5); key.position.set(-2, 4, 2);
+scene.add(key);
+const rim = new THREE.DirectionalLight(0x88bbff, .5); rim.position.set(2, 1, -3);
+scene.add(rim);
+
+/* ======================= 2. 骨架约定 =======================
+   模型只要节点名含这些关键词就会被自动绑定；
+   找不到翅膀时退化为整只轻微摆动（不会有振翅）。
+   ============================================================ */
+const NAME = {
+  body:    ['body', 'thorax', 'torso', 'mesh'],
+  abdomen: ['abdomen', 'belly', 'abd'],
+  head:    ['head'],
+  wingL:   ['wing_l', 'wingl', 'wing_left', 'left_wing', 'wing.001', 'wing1'],
+  wingR:   ['wing_r', 'wingr', 'wing_right', 'right_wing', 'wing.002', 'wing2'],
+  leg:     ['leg'],
+  antenna: ['antenna', 'anten', 'arista']
+};
+function findNode(root, keys) {
+  let hit = null;
+  root.traverse(o => {
+    if (hit || !o.name) return;
+    const n = o.name.toLowerCase();
+    if (keys.some(k => n.includes(k))) hit = o;
+  });
+  return hit;
+}
+function findAll(root, keys) {
+  const out = [];
+  root.traverse(o => {
+    if (o.name) {
+      const n = o.name.toLowerCase();
+      if (keys.some(k => n.includes(k))) out.push(o);
+    }
+  });
+  return out;
+}
+
+// 自动轴心：翅膀必须绕「翅根」转，AI 生成的模型轴心常在质心。
+// 取翅膀包围盒上离身体中轴最近的点作为新轴心。
+function repivotToBody(mesh) {
+  if (!mesh.geometry) return mesh;
+  mesh.geometry.computeBoundingBox();
+  const bb = mesh.geometry.boundingBox;
+  const local = new THREE.Vector3();
+  // 候选：包围盒 8 角里 |x| 最小的（即最靠中轴的一侧）
+  let best = null, bestAbs = Infinity;
+  for (const x of [bb.min.x, bb.max.x])
+    for (const y of [bb.min.y, bb.max.y])
+      for (const z of [bb.min.z, bb.max.z]) {
+        const p = new THREE.Vector3(x, y, z).applyMatrix4(mesh.matrixWorld);
+        if (Math.abs(p.x) < bestAbs) { bestAbs = Math.abs(p.x); best = p.clone(); }
+      }
+  if (!best) return mesh;
+  const pivot = new THREE.Group();
+  mesh.parent.add(pivot);
+  pivot.position.copy(best);
+  const inv = new THREE.Matrix4().copy(pivot.matrixWorld).invert();
+  pivot.attach(mesh);            // 保持世界变换
+  mesh.position.copy(local.set(0, 0, 0).applyMatrix4(
+    new THREE.Matrix4().makeTranslation(0, 0, 0)));
+  // 把网格拉回轴心原点
+  mesh.position.set(0, 0, 0);
+  return pivot;
+}
+
+/* ======================= 3. 内置替代模型（未导入 GLB 时） ======================= */
+function buildStandIn() {
+  const g = new THREE.Group();
+  const dark = new THREE.MeshStandardMaterial({ color: 0x2a2f36, roughness: .55, metalness: .25 });
+  const wingM = new THREE.MeshStandardMaterial({
+    color: 0xdce8f5, roughness: .15, metalness: 0,
+    transparent: true, opacity: .42, side: THREE.DoubleSide
+  });
+
+  const body = new THREE.Group(); body.name = 'body'; g.add(body);
+
+  const thorax = new THREE.Mesh(new THREE.SphereGeometry(.30, 20, 16), dark);
+  thorax.scale.set(1, .62, 1.25); body.add(thorax);
+
+  const abdomen = new THREE.Group(); abdomen.name = 'abdomen';
+  abdomen.position.set(0, -.02, .36); body.add(abdomen);
+  const abd = new THREE.Mesh(new THREE.SphereGeometry(.24, 20, 16), dark);
+  abd.scale.set(1, .6, 1.7); abdomen.add(abd);
+
+  const head = new THREE.Group(); head.name = 'head';
+  head.position.set(0, .02, -.34); body.add(head);
+  const hd = new THREE.Mesh(new THREE.SphereGeometry(.19, 18, 14), dark); head.add(hd);
+  const eyeM = new THREE.MeshStandardMaterial({ color: 0x8d3a2a, roughness: .25, metalness: .1 });
+  for (const s of [-1, 1]) {
+    const e = new THREE.Mesh(new THREE.SphereGeometry(.10, 14, 12), eyeM);
+    e.position.set(s * .11, .05, -.06); head.add(e);
+  }
+
+  // 翅膀：轴心在翅根（靠近身体一侧）
+  const wings = [];
+  for (const s of [-1, 1]) {
+    const pivot = new THREE.Group();
+    pivot.name = s < 0 ? 'wing_L' : 'wing_R';
+    pivot.position.set(s * .12, .12, -.02);
+    body.add(pivot);
+    const shape = new THREE.Shape();
+    shape.moveTo(0, 0);
+    shape.lineTo(.95, -.02);
+    shape.quadraticCurveTo(.80, .34, .48, .30);
+    shape.quadraticCurveTo(.20, .26, 0, 0);
+    const w = new THREE.Mesh(new THREE.ShapeGeometry(shape), wingM);
+    if (s < 0) w.scale.x = -1;               // 左侧镜像
+    pivot.add(w);
+    wings.push(pivot);
+  }
+
+  // 6 条腿
+  const legs = [];
+  const legM = new THREE.MeshStandardMaterial({ color: 0x14181c, roughness: .8 });
+  for (const [zi, z] of [[0, -.12], [1, .02], [2, .16]])
+    for (const s of [-1, 1]) {
+      const L = new THREE.Group();
+      L.name = `leg_${zi}_${s < 0 ? 'L' : 'R'}`;
+      L.position.set(s * .16, -.14, z);
+      body.add(L);
+      const seg = new THREE.Mesh(new THREE.CylinderGeometry(.022, .014, .34, 6), legM);
+      seg.position.set(s * .12, -.14, 0);
+      seg.rotation.z = s * 1.05;
+      L.add(seg);
+      legs.push(L);
+    }
+  return { root: g, body, abdomen, head, wings, legs };
+}
+
+/* ======================= 4. 载入 GLB ======================= */
+let rig = null;
+function bindModel(root) {
+  root.updateMatrixWorld(true);
+  let body = findNode(root, NAME.body) || root;
+  let abdomen = findNode(root, NAME.abdomen);
+  let head = findNode(root, NAME.head);
+
+  // 翅膀：优先按名字分左右；否则按质心 x 正负自动分
+  let wings = [];
+  const wl = findNode(root, NAME.wingL), wr = findNode(root, NAME.wingR);
+  if (wl && wr) wings = [wl, wr];
+  else {
+    const all = findAll(root, ['wing']);
+    if (all.length) {
+      all.forEach(w => { w.userData.pivot = true; });
+      wings = all.slice(0, 2);
+    }
+  }
+  wings = wings.map(w => (w.userData.pivot ? w : repivotToBody(w)));
+  // 记录左右方向，用于镜像振翅
+  wings.forEach(w => {
+    const p = new THREE.Vector3(); w.getWorldPosition(p);
+    w.userData.side = p.x < 0 ? -1 : 1;
+    w.userData.rest = w.rotation.clone();
+    w.userData.restQ = w.quaternion.clone();
+  });
+
+  const legs = findAll(root, NAME.leg);
+  legs.forEach(l => { l.userData.rest = l.rotation.clone(); });
+
+  rig = { root, body, abdomen, head, wings, legs, isGLB: true };
+
+  // 归一化：把模型缩放到体长约 1.1 单位
+  const box = new THREE.Box3().setFromObject(root);
+  const size = new THREE.Vector3(); box.getSize(size);
+  const maxDim = Math.max(size.x, size.y, size.z) || 1;
+  const k = 1.15 / maxDim;
+  root.scale.setScalar(k);
+  const box2 = new THREE.Box3().setFromObject(root);
+  const c = new THREE.Vector3(); box2.getCenter(c);
+  root.position.sub(c);                      // 居中
+
+  document.getElementById('bindInfo').innerHTML =
+    `<b>已绑定</b><br>体 ${body.name || '—'} · 腹 ${abdomen ? abdomen.name : '（未找到，跳过呼吸）'} · ` +
+    `头 ${head ? head.name : '—'}<br>翅膀 <b>${wings.length}</b> 个${wings.length ? '（轴心已自动校正）' : '（未找到 → 无振翅）'}` +
+    `<br>腿 ${legs.length} 个`;
+}
+
+const loader = new GLTFLoader();
+let clips = [];
+let mixer = null;
+let activeClip = null, activeAction = null;
+
+// 三个烘焙动画的用途约定（来自模型文件名说明）
+//   metarig|3 → 待机：轻微煽动翅膀
+//   metarig|! → 飞行：起飞 + 持续煽动翅膀
+//   metarig|2 → 滑行：轻微煽动翅膀
+// 匹配方式：名字里含 "|3"、"|!"、"|2"；找不到就按顺序兜底
+function pickClip(kind) {
+  if (!clips.length) return null;
+  const prefer = {
+    perch: ['|3', '3'],
+    fly:   ['|!', '!', '4'],
+    glide: ['|2', '2', '5']
+  }[kind];
+  for (const p of prefer) {
+    const hit = clips.find(c => c.name && c.name.includes(p));
+    if (hit) return hit;
+  }
+  return clips[0];
+}
+
+function playClip(kind, loop = true) {
+  if (!mixer) return;
+  const c = pickClip(kind);
+  if (!c || activeClip === c) return;
+  if (activeAction) activeAction.stop();
+  activeAction = mixer.clipAction(c);
+  activeAction.reset();
+  activeAction.setLoop(THREE.LoopRepeat);
+  activeAction.play();
+  activeClip = c;
+  return c;
+}
+
+function stopClip() {
+  if (activeAction) { activeAction.stop(); activeAction = null; }
+  activeClip = null;
+}
+
+function loadGLB(arrayBuffer, srcLabel) {
+  loader.parse(arrayBuffer, '', (gltf) => {
+    scene.remove(rig.root);
+    const m = gltf.scene;
+    scene.add(m);
+    bindModel(m);
+    clips = gltf.animations || [];
+    mixer = new THREE.AnimationMixer(m);
+    // 记录动画片段
+    if (clips.length) {
+      const list = clips.map(c =>
+        `· ${c.name || '(未命名)'} ${c.duration.toFixed(2)}s${c === pickClip('perch') ? ' [待机]' : ''}${c === pickClip('fly') ? ' [飞行]' : ''}${c === pickClip('glide') ? ' [滑行]' : ''}`
+      ).join('<br>');
+      document.getElementById('bindInfo').innerHTML +=
+        `<br><br><b>自带动画 ${clips.length} 段（烘焙优先于代码驱动）</b><br>${list}`;
+    }
+    if (srcLabel) {
+      document.getElementById('bindInfo').innerHTML +=
+        `<br><br><span style="font-size:10px">来源：${srcLabel}</span>`;
+    }
+    // 载入后从待机开始播放（mixer 已就绪）
+    setPose('perch');
+  }, (e) => {
+    document.getElementById('bindInfo').textContent = '解析失败：' + (e && e.message ? e.message : e);
+  });
+}
+
+// 启动时自动加载标准位置的模型；没有就用内置替代模型
+const DEFAULT_MODEL = 'models/butterfly.glb';
+fetch(DEFAULT_MODEL)
+  .then(r => (r.ok ? r.arrayBuffer() : Promise.reject(r.status)))
+  .then(buf => loadGLB(buf, 'ui/models/butterfly.glb'))
+  .catch(() => {
+    document.getElementById('bindInfo').innerHTML +=
+      `<br><br><span style="font-size:10px">未检测到 <b>${DEFAULT_MODEL}</b>，当前为内置替代模型。` +
+      `把导出的 glb 放到 ui/models/ 下，刷新即可</span>`;
+  });
+
+/* ---------- 拖放 ---------- */
+const drop = document.getElementById('drop');
+['dragenter', 'dragover'].forEach(t => drop.addEventListener(t, e => {
+  e.preventDefault(); drop.classList.add('over');
+}));
+['dragleave', 'drop'].forEach(t => drop.addEventListener(t, e => {
+  e.preventDefault(); drop.classList.remove('over');
+}));
+drop.addEventListener('drop', e => {
+  const f = e.dataTransfer.files[0];
+  if (!f) return;
+  if (!/\.(glb|gltf)$/i.test(f.name)) {
+    document.getElementById('bindInfo').textContent = '请拖入 .glb 文件（.gltf 需配套贴图，建议 .glb）';
+    return;
+  }
+  f.arrayBuffer().then(loadGLB);
+});
+
+/* ======================= 5. 动画驱动（核心：无需美术做动画） ======================= */
+const P = { flapHz: 200, flapAmp: 38 };
+let pose = 'perch', poseT = 0, auto = true;
+let heading = 0, alt = 0, targetAlt = 0, bob = 0;
+
+function setPose(p) {
+  if (pose === p) return;
+  pose = p; poseT = 0;
+  if (p === 'fly') targetAlt = .55;
+  else if (p === 'glide') targetAlt = .32;
+  else targetAlt = 0;
+  // 烘焙动画映射：有 clip 则播放对应动画，否则退回代码驱动
+  if (mixer) {
+    if (p === 'fly') playClip('fly');
+    else if (p === 'glide') playClip('glide');
+    else playClip('perch');            // perch/groom/walk 共用待机
+  }
+}
+
+// 每帧驱动：有烘焙动画时骨架局部交给 mixer（代码只管 root 平移/朝向/前倾），
+// 无 clip 时退回完整代码驱动（振翅/搓手/爬行）
+function animateRig(t, dt) {
+  if (!rig) return;
+  poseT += dt;
+  const { body, abdomen, head, wings, legs } = rig;
+  const fly = pose === 'fly';
+  const glide = pose === 'glide';
+  const hasClip = !!mixer;
+
+  // —— 高度 / 浮动 / 朝向（永远代码控制）——
+  alt += (targetAlt - alt) * Math.min(1, dt * 6);
+  bob = (fly || glide) ? Math.sin(t * 11) * .045 : Math.sin(t * 1.2) * .012;
+  rig.root.position.y = alt + bob;
+  rig.root.rotation.y = heading;
+
+  if (hasClip) {
+    // 烘焙动画接管骨架：只做整体前倾（飞行）与轻微俯仰（滑行）
+    rig.root.rotation.x = fly ? -.14 : (glide ? -.08 : 0);
+    return;
+  }
+
+  // —— 腹部呼吸（有 abdomen 节点才做）——
+  if (abdomen) {
+    const br = fly ? 0 : 1 + Math.sin(t * 2.2) * .022;
+    abdomen.scale.set(br, br, fly ? 1 : 1 + Math.sin(t * 2.2) * .012);
+    abdomen.rotation.x = fly ? -.12 : 0;
+  }
+
+  // —— 振翅 ——
+  const amp = THREE.MathUtils.degToRad(P.flapAmp);
+  wings.forEach((w, i) => {
+    const s = w.userData.side || (i === 0 ? -1 : 1);
+    const rest = w.userData.rest;
+    if (fly || glide) {
+      const freq = fly ? P.flapHz : P.flapHz * .22;   // 滑行慢扇
+      const ph = t * freq * Math.PI * 2 + (i * Math.PI * .04);
+      w.rotation.set(rest.x, rest.y, rest.z);
+      w.rotateZ(Math.sin(ph) * amp * (glide ? .4 : 1));
+      w.rotateY(Math.sin(ph) * amp * .18 * s);
+    } else if (pose === 'walk') {
+      const tw = Math.sin(t * 3 + i) * .04;
+      w.rotation.set(rest.x, rest.y + s * .55, rest.z + tw);
+    } else {
+      const k = Math.min(1, poseT * 4);
+      w.rotation.set(rest.x,
+        THREE.MathUtils.lerp(w.rotation.y, rest.y + s * 1.32, k),
+        THREE.MathUtils.lerp(w.rotation.z, rest.z - .10, k));
+    }
+  });
+
+  // —— 搓手 / 爬行 / 头部 / 前倾 ——
+  legs.forEach((l, i) => {
+    const rest = l.userData.rest || l.rotation;
+    const isFront = i < 2;
+    if (pose === 'groom' && isFront) {
+      const s = l.position.x < 0 ? -1 : 1;
+      l.rotation.set(rest.x - 1.15, rest.y + s * .5,
+        rest.z + Math.sin(t * 15 + i) * .35);
+    } else if (pose === 'walk') {
+      const ph = t * 11 + i * 1.7;
+      l.rotation.set(rest.x + Math.sin(ph) * .3, rest.y, rest.z);
+    } else {
+      l.rotation.set(
+        THREE.MathUtils.lerp(l.rotation.x, rest.x, dt * 8),
+        THREE.MathUtils.lerp(l.rotation.y, rest.y, dt * 8),
+        THREE.MathUtils.lerp(l.rotation.z, rest.z, dt * 8));
+    }
+  });
+  if (head) head.rotation.x = pose === 'groom' ? .35 : Math.sin(t * 1.4) * .04;
+  body.rotation.x = fly ? -.16 : 0;
+}
+
+/* ======================= 6. 自动行为（与 v3 引擎同源的简化版） ======================= */
+const states = ['perch', 'perch', 'glide', 'fly', 'perch'];
+function autoTick(dt) {
+  if (!auto) return;
+  if (pose === 'perch' && poseT > 1.8 + Math.random() * 2) {
+    setPose(states[Math.floor(Math.random() * states.length)]);
+  } else if (pose === 'groom' && poseT > 1.4 + Math.random()) setPose('perch');
+  else if (pose === 'walk') {
+    heading += Math.sin(poseT * .8) * dt * .4;
+    if (poseT > 1.6 + Math.random() * 1.5) setPose('perch');
+  } else if (pose === 'fly' || pose === 'glide') {
+    heading += Math.sin(poseT * 2.4) * dt * (pose === 'fly' ? 2.2 : 1.2);
+    rig.root.position.x += Math.sin(heading) * dt * (pose === 'fly' ? .55 : .30);
+    rig.root.position.z += Math.cos(heading) * dt * (pose === 'fly' ? .55 : .30);
+    rig.root.position.x = THREE.MathUtils.clamp(rig.root.position.x, -1.3, 1.3);
+    rig.root.position.z = THREE.MathUtils.clamp(rig.root.position.z, -1.3, 1.3);
+    if (poseT > 2.2 + Math.random() * 1.5) setPose('perch');
+  }
+}
+
+/* ======================= 7. 主循环 ======================= */
+const clock = new THREE.Clock();
+let statTick = 0;
+function loop() {
+  const dt = Math.min(.05, clock.getDelta());
+  const t = clock.elapsedTime;
+  autoTick(dt);
+  if (mixer) mixer.update(dt);
+  animateRig(t, dt);
+  renderer.render(scene, cam);
+  if (++statTick % 10 === 0) {
+    document.getElementById('stat').textContent =
+      `姿态 ${pose} · 高度 ${alt.toFixed(2)} · 翅膀 ${rig ? rig.wings.length : 0} · ` +
+      `腿 ${rig ? rig.legs.length : 0} · ${rig && rig.isGLB ? 'GLB 模型' : '内置替代模型'}`;
+  }
+  requestAnimationFrame(loop);
+}
+
+// 初始：内置替代模型
+const stand = buildStandIn();
+stand.wings.forEach((w, i) => {
+  w.userData.side = i === 0 ? -1 : 1;
+  w.userData.rest = w.rotation.clone();
+});
+stand.legs.forEach(l => { l.userData.rest = l.rotation.clone(); });
+rig = { ...stand, isGLB: false };
+scene.add(stand.root);
+loop();
+
+/* ======================= 8. UI ======================= */
+document.querySelectorAll('#poses .chip').forEach(el => {
+  el.onclick = () => {
+    document.querySelectorAll('#poses .chip').forEach(x => x.classList.remove('on'));
+    el.classList.add('on');
+    auto = false; document.getElementById('auto').textContent = '自动行为：关';
+    setPose(el.dataset.p);
+  };
+});
+document.querySelectorAll('#views .chip').forEach(el => {
+  el.onclick = () => {
+    document.querySelectorAll('#views .chip').forEach(x => x.classList.remove('on'));
+    el.classList.add('on');
+    setView(el.dataset.v);
+  };
+});
+document.getElementById('flapHz').oninput = e => {
+  P.flapHz = +e.target.value; document.getElementById('fqVal').textContent = P.flapHz;
+};
+document.getElementById('flapAmp').oninput = e => {
+  P.flapAmp = +e.target.value; document.getElementById('faVal').textContent = P.flapAmp;
+};
+document.getElementById('auto').onclick = e => {
+  auto = !auto;
+  e.target.textContent = '自动行为：' + (auto ? '开' : '关');
+};
+</script>
+</body>
+</html>

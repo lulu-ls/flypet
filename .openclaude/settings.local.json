@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls ui/*.html ui/*.js)",
+      "Bash(cargo check:*)"
+    ]
+  }
+}
