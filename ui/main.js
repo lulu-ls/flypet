@@ -230,11 +230,13 @@ async function loadInfo() {
   if (isTauri) {
     try { info = await window.__TAURI__.core.invoke('feed_info'); } catch (e) {}
   }
-  if (!info) info = { affinity: 0, affinityLevel: 1, fedCount: 0, interactCount: 0, lastItem: null };
+  if (!info) info = { affinity: 0, affinityLevel: 1, fedCount: 0, interactCount: 0, durationSecs: 0, ageSecs: 0, lastItem: null };
   $('affinity').textContent = info.affinity;
   $('affinityLv').textContent = 'Lv.' + (info.affinityLevel || 1);
   $('fedCount').textContent = info.fedCount;
   $('interactCount').textContent = info.interactCount;
+  $('duration').textContent = fmtDuration(info.durationSecs || 0);
+  $('age').textContent = fmtAge(info.ageSecs || 0);
   const card = $('itemCard');
   if (info.lastItem) {
     const meta = RARITY_META[info.lastItem.rarity] || RARITY_META.fan;
@@ -286,6 +288,29 @@ function updateFeedBtn(info) {
 
 function affinityGain(r) {
   return { fan: 2, ling: 4, xuan: 8, di: 16, tian: 32, xian: 64, shen: 128 }[r] || 2;
+}
+
+// 相处时长格式化：秒 → 「X 天 X 小时 / X 小时 X 分 / X 分钟 / X 秒」
+function fmtDuration(totalSecs) {
+  const s = Math.floor(totalSecs);
+  if (s < 60) return s + ' 秒';
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + ' 分钟';
+  const h = Math.floor(m / 60);
+  if (h < 24) return m % 60 ? h + ' 小时 ' + (m % 60) + ' 分' : h + ' 小时';
+  const d = Math.floor(h / 24);
+  return h % 24 ? d + ' 天 ' + (h % 24) + ' 小时' : d + ' 天';
+}
+
+// 存活格式化：单位随周期自动升级（分钟 → 小时 → 天 → 年），只显示最大单位
+// 例：1 分钟 / 5 小时 / 22 天 / 1.2 年（年保留 1 位小数）
+function fmtAge(totalSecs) {
+  const s = Math.floor(totalSecs);
+  if (s < 3600) return Math.max(1, Math.floor(s / 60)) + ' 分钟';
+  if (s < 86400) return Math.floor(s / 3600) + ' 小时';
+  const days = s / 86400;
+  if (days < 365) return Math.floor(days) + ' 天';
+  return (days / 365).toFixed(1) + ' 年';
 }
 
 function showMsg(text) {

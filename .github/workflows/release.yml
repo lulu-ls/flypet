@@ -1,0 +1,48 @@
+name: Release Build
+
+# 推送 v* tag 时触发：打包 macOS（通用二进制，Intel+Apple Silicon）与 Windows 安装包
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            # universal-apple-darwin = arm64 + x86_64 合并包
+            args: --target universal-apple-darwin --bundles app,dmg
+          - platform: windows-latest
+            args: --bundles nsis
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # mac 需要 arm64 + x86_64 两个 target 才能出通用包
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Build & draft release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'FlyPet ${{ github.ref_name }}'
+          releaseBody: '在 Assets 里下载对应平台的安装包。'
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}

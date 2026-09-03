@@ -36,6 +36,13 @@
     background: rgba(255,255,255,.6); border-radius: 8px; padding: 1px 8px;
     pointer-events: none;
   }
+  .stage-meta {
+    position: absolute; top: 6px; left: 10px;
+    font-size: 11px; color: #8a8174; line-height: 1.6;
+    background: rgba(255,255,255,.6); border-radius: 8px; padding: 2px 8px;
+    pointer-events: none;
+  }
+  .stage-meta b { color: #4a4436; font-weight: 600; }
   .stats {
     display: grid; grid-template-columns: 1fr 1fr 1fr;
     gap: 1px; background: #ddd6c6;
@@ -90,6 +97,10 @@
 
   <div class="pet-stage">
     <canvas id="pet"></canvas>
+    <div class="stage-meta">
+      <div>相处 <b id="duration">0 分钟</b></div>
+      <div>存活 <b id="age">0 分钟</b></div>
+    </div>
     <div class="stage-label">待机中</div>
   </div>
 

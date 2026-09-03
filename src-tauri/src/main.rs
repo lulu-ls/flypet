@@ -146,6 +146,10 @@ struct FeedInfo {
     affinity_level: i32,
     fed_count: u32,
     interact_count: u32,
+    /// 相处时长（秒，按物种独立累计）
+    duration_secs: u64,
+    /// 存活时长（秒）：出壳（hatched_at）至今
+    age_secs: u64,
     last_item: Option<FeedItem>,
 }
 
@@ -182,6 +186,8 @@ fn feed_info(app: AppHandle, shared: State<'_, SharedProfile>) -> FeedInfo {
             affinity_level: 1,
             fed_count: 0,
             interact_count: 0,
+            duration_secs: 0,
+            age_secs: 0,
             last_item: None,
         };
     };
@@ -194,6 +200,8 @@ fn feed_info(app: AppHandle, shared: State<'_, SharedProfile>) -> FeedInfo {
         affinity_level: profile::affinity_level(p.affinity),
         fed_count: p.fed_count,
         interact_count: p.interact_count,
+        duration_secs: p.duration_secs,
+        age_secs: (profile::now() - p.hatched_at).max(0) as u64,
         last_item: p.last_item.as_ref().map(|li| FeedItem {
             name: li.name.clone(),
             rarity: li.rarity,
@@ -230,6 +238,8 @@ fn do_feed(app: &AppHandle) -> FeedInfo {
                 affinity_level: profile::affinity_level(p.affinity),
                 fed_count: p.fed_count,
                 interact_count: p.interact_count,
+                duration_secs: p.duration_secs,
+                age_secs: (profile::now() - p.hatched_at).max(0) as u64,
                 last_item: None,
             };
         }
@@ -268,6 +278,8 @@ fn do_feed(app: &AppHandle) -> FeedInfo {
             affinity_level: profile::affinity_level(p.affinity),
             fed_count: p.fed_count,
             interact_count: p.interact_count,
+            duration_secs: p.duration_secs,
+            age_secs: (profile::now() - p.hatched_at).max(0) as u64,
             last_item: Some(FeedItem {
                 name: name.to_string(),
                 rarity,
@@ -620,6 +632,17 @@ fn build_tray(app: &AppHandle, current_species: &str) -> tauri::Result<()> {
 
 // ---------- 主循环（§6.1） ----------
 
+/// 相处时长落盘：给指定物种档案累加秒数并保存
+fn add_duration(app: &AppHandle, sid: &str, secs: u64) {
+    if secs == 0 {
+        return;
+    }
+    let st = app.state::<SharedProfile>();
+    let mut guard = st.0.lock().unwrap();
+    guard.for_species(sid).duration_secs += secs;
+    profile::save_profiles(app, &guard);
+}
+
 fn run_loop(app: AppHandle) {
     let win = app.get_webview_window("insect").expect("missing window");
     let (half_w, half_h) = window_half(&win, 140.0, 160.0);
@@ -636,6 +659,8 @@ fn run_loop(app: AppHandle) {
     // 窗口内偏移平滑（低通）：窗口 clamp 到屏边时 off 突变，平滑后前端不会瞬移
     let mut smooth_off_x = 0.0f32;
     let mut smooth_off_y = 0.0f32;
+    // 相处时长累计（秒，当前物种）：满 60s 批量落盘，避免每帧写盘
+    let mut dur_acc = 0.0f64;
 
     loop {
         // 暂停：冻在原地，重置计时防止恢复时 dt 跳变
@@ -667,6 +692,11 @@ fn run_loop(app: AppHandle) {
             if let Some(req) = app.try_state::<SpeciesRequest>() {
                 let mut slot = req.0.lock().unwrap();
                 if let Some(id) = slot.take() {
+                    // 换物种：先结算旧物种的相处时长，再切换
+                    if dur_acc >= 1.0 {
+                        add_duration(&app, ins.species_id(), dur_acc as u64);
+                        dur_acc = 0.0;
+                    }
                     if ins.set_species(&id) {
                         ins.relaunch(cursor, &screen);
                         species_changed = true;
@@ -768,6 +798,13 @@ fn run_loop(app: AppHandle) {
         // ---- 锁外：AppKit / 事件 API（主线程或子线程均可安全调用）----
         let (emit_state, state, wx, wy, scale_factor, perched, pos, flee_radius, cursor, switched_to) =
             frame;
+        // 相处时长：每帧累计，满 60s 落盘一次（不每帧写盘）；暂停期间 dt 不累计
+        dur_acc += dt as f64;
+        if dur_acc >= 60.0 {
+            let secs = dur_acc as u64;
+            add_duration(&app, &state.species, secs);
+            dur_acc -= secs as f64;
+        }
         // 换物种后：把新物种档案的亲密度等级同步进昆虫（亲近行为档位立即切换）
         if let Some(sid) = &switched_to {
             let lv = {

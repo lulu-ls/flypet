@@ -58,6 +58,9 @@ pub struct Profile {
     /// 互动次数（独立统计：喂食 +1，后续拖动/说话等 +1）
     #[serde(default)]
     pub interact_count: u32,
+    /// 相处时长（秒）：主循环累计运行时间，按物种独立；满 60s 批量落盘
+    #[serde(default)]
+    pub duration_secs: u64,
     /// 上次成功喂食的 unix 秒；0 = 从未喂过
     pub last_fed_at: i64,
     pub hatched_at: i64,
@@ -76,6 +79,7 @@ impl Default for Profile {
             affinity: 0,
             fed_count: 0,
             interact_count: 0,
+            duration_secs: 0,
             last_fed_at: 0,
             hatched_at: now(),
             spawned_day: today(),
