@@ -2,7 +2,9 @@
 
 # 🦋 FlyPet
 
-**一只住在桌面上的小飞虫**
+**谁能拒绝一只住在桌面上的小飞虫呢？（3D建模 立体 真实）**
+- <img width="620" height="376" alt="image" src="https://github.com/user-attachments/assets/78bffcb4-74a8-4236-9fc9-87e0bb7ce2f1" />
+
 
 鼠标靠近会惊飞 · 空闲时自己起落遛弯 · 喂食攒亲密度
 
