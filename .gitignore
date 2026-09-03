@@ -4,6 +4,10 @@
 # production
 /dist
 
+# AI 工具本地配置（含本地会话痕迹，不入仓）
+.openclaude/
+.commandcode/
+
 # misc
 .DS_Store
 *.pem
