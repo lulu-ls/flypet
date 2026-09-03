@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Manager;
 
-/// 喂食冷却时长：1 小时
-pub const FEED_COOLDOWN_SECS: i64 = 3600;
+/// 喂食冷却时长：10 分钟
+pub const FEED_COOLDOWN_SECS: i64 = 600;
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct FeedStats {
@@ -159,8 +159,7 @@ pub fn affinity_level(affinity: i32) -> i32 {
     lv
 }
 
-/// 剩余冷却秒数（<=0 表示可喂）。测试阶段无冷却；恢复正式冷却时启用。
-#[allow(dead_code)]
+/// 剩余冷却秒数（<=0 表示可喂）
 pub fn remaining_cooldown(last_fed_at: i64) -> i64 {
     (last_fed_at + FEED_COOLDOWN_SECS - now()).max(0)
 }

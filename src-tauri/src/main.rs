@@ -185,10 +185,11 @@ fn feed_info(app: AppHandle, shared: State<'_, SharedProfile>) -> FeedInfo {
             last_item: None,
         };
     };
-    // 测试阶段无冷却：can_feed 恒 true，剩余 0
+    // 冷却检查：剩余 >0 时不可喂
+    let remain = profile::remaining_cooldown(p.last_fed_at);
     FeedInfo {
-        can_feed: true,
-        remaining_sec: 0,
+        can_feed: remain <= 0,
+        remaining_sec: remain,
         affinity: p.affinity,
         affinity_level: profile::affinity_level(p.affinity),
         fed_count: p.fed_count,
@@ -209,14 +210,30 @@ fn current_species(app: &AppHandle) -> String {
         .unwrap_or_else(|_| "butterfly".to_string())
 }
 
-/// 喂食核心逻辑：抽道具 → 加分 → 落盘（锁内原子）。
-/// 测试阶段暂不加冷却（连续投喂便于验证动画/道具）。
+/// 喂食核心逻辑：冷却检查 → 抽道具 → 加分 → 落盘（锁内原子）。
 /// 供托盘线程与 invoke command 共用。
 /// 只对「当前物种」的档案生效（各物种独立成长）。
 fn do_feed(app: &AppHandle) -> FeedInfo {
     let sid = current_species(app);
     let shared = app.state::<SharedProfile>();
     let mut profiles = shared.0.lock().unwrap();
+    // 冷却中：拒绝本次投喂（不抽道具、不落盘、不弹动画）。
+    // last_item 返回 None 让 do_feed_and_animate 跳过动画窗。
+    {
+        let p = profiles.for_species(&sid);
+        let remain = profile::remaining_cooldown(p.last_fed_at);
+        if remain > 0 {
+            return FeedInfo {
+                can_feed: false,
+                remaining_sec: remain,
+                affinity: p.affinity,
+                affinity_level: profile::affinity_level(p.affinity),
+                fed_count: p.fed_count,
+                interact_count: p.interact_count,
+                last_item: None,
+            };
+        }
+    }
     // 抽道具（用时间种子，独立于宠物种子）
     let mut seed = seed_now();
     let (name, rarity) = food::roll_item(&mut seed);
@@ -246,7 +263,7 @@ fn do_feed(app: &AppHandle) -> FeedInfo {
         }
         FeedInfo {
             can_feed: true,
-            remaining_sec: 0,
+            remaining_sec: profile::FEED_COOLDOWN_SECS,
             affinity: p.affinity,
             affinity_level: profile::affinity_level(p.affinity),
             fed_count: p.fed_count,
@@ -266,6 +283,10 @@ fn do_feed(app: &AppHandle) -> FeedInfo {
 /// 同时写入投喂请求（投食点 = 当前光标位置），run_loop 消费后昆虫飞过去进食。
 fn do_feed_and_animate(app: &AppHandle) -> FeedInfo {
     let info = do_feed(app);
+    // 冷却中被拒绝：不弹动画、不写投食点（否则宠物仍会飞过去互动）
+    if !info.can_feed {
+        return info;
+    }
     if let Some(item) = &info.last_item {
         // 动画窗用宠物自身的基因组种子 + 物种，保证外观与主窗一致
         let (pet_seed, pet_species) = app
@@ -364,9 +385,23 @@ fn finish_anim(app: AppHandle) {
     }
 }
 
-/// 更新托盘「投喂」项文案（测试阶段不加冷却，固定为「投喂」）
-fn update_feed_label(feed_item: &tauri::menu::MenuItem<tauri::Wry>) {
-    let _ = feed_item.set_text("投喂");
+/// 更新托盘「投喂」项文案：冷却中显示剩余分钟，可喂时恢复「投喂」
+fn update_feed_label(app: &AppHandle, feed_item: &tauri::menu::MenuItem<tauri::Wry>) {
+    let remain = {
+        let sid = current_species(app);
+        let shared = app.state::<SharedProfile>();
+        let profiles = shared.0.lock().unwrap();
+        profiles
+            .get(&sid)
+            .map(|p| profile::remaining_cooldown(p.last_fed_at))
+            .unwrap_or(0)
+    };
+    let text = if remain > 0 {
+        format!("投喂（剩 {} 分钟）", remain / 60 + 1)
+    } else {
+        "投喂".to_string()
+    };
+    let _ = feed_item.set_text(&text);
 }
 
 fn show_panel(app: &AppHandle) {
@@ -512,7 +547,7 @@ fn build_tray(app: &AppHandle, current_species: &str) -> tauri::Result<()> {
     let items1: Vec<_> = items.iter().cloned().collect();
     let feed1 = feed_i.clone();
     // 启动时初始化「投喂」文案
-    update_feed_label(&feed_i);
+    update_feed_label(app, &feed_i);
 
     TrayIconBuilder::with_id("flypet-tray")
         .icon(
@@ -544,7 +579,7 @@ fn build_tray(app: &AppHandle, current_species: &str) -> tauri::Result<()> {
                     let feed2 = feed1.clone();
                     std::thread::spawn(move || {
                         do_feed_and_animate(&app2);
-                        update_feed_label(&feed2);
+                        update_feed_label(&app2, &feed2);
                     });
                 }
                 "feed_info" => {

@@ -110,7 +110,7 @@ const SPECIES_MODELS = {
     clipKeys: { perch: ['idle'], fly: ['fly'], glide: ['hover', 'fly'] },
     perchRandom: true,
     // 苍蝇：身形小、机动急（高转向速率、小横滚、颠簸明显）
-    dim: 0.42,
+    dim: 0.338,
     turnRate: 6.0, bank: 0.35, pitchLean: 0.2, bobAmp: 0.006,
     bobFreq: 1.6, turb: 0.6
   }

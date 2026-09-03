@@ -31,7 +31,7 @@ const SPECIES_MODELS = {
   fly: {
     url: 'models/fly.glb',
     clipKeys: ['idle1', 'idle'],
-    dim: 0.75
+    dim: 0.604
   }
 };
 
@@ -248,7 +248,40 @@ async function loadInfo() {
     $('itemRarity').textContent = '喂食后这里显示获得的道具';
     card.querySelector('.ico').textContent = '🍯';
   }
+  updateFeedBtn(info);
   return info;
+}
+
+// ---------- 投喂按钮冷却倒计时 ----------
+let feedCooldownTimer = null;
+
+function updateFeedBtn(info) {
+  const btn = $('btnFeed');
+  clearInterval(feedCooldownTimer);
+  feedCooldownTimer = null;
+  if (info && !info.canFeed && info.remainingSec > 0) {
+    let remain = info.remainingSec;
+    const render = () => {
+      const m = Math.floor(remain / 60), s = remain % 60;
+      btn.textContent = `⏳ ${m}:${String(s).padStart(2, '0')}`;
+    };
+    render();
+    btn.disabled = true;
+    feedCooldownTimer = setInterval(() => {
+      remain--;
+      if (remain <= 0) {
+        clearInterval(feedCooldownTimer);
+        feedCooldownTimer = null;
+        btn.disabled = false;
+        btn.textContent = '🍽️ 投喂';
+        return;
+      }
+      render();
+    }, 1000);
+  } else {
+    btn.disabled = false;
+    btn.textContent = '🍽️ 投喂';
+  }
 }
 
 function affinityGain(r) {
@@ -272,6 +305,8 @@ $('btnFeed').addEventListener('click', async () => {
       if (info && info.lastItem) {
         const meta = RARITY_META[info.lastItem.rarity] || RARITY_META.fan;
         showMsg(`获得 ${meta.label}·${info.lastItem.name}，亲密度 +${affinityGain(info.lastItem.rarity)}`);
+      } else if (info && !info.canFeed) {
+        showMsg(`小家伙还没吃完，约 ${Math.max(1, Math.ceil((info.remainingSec || 0) / 60))} 分钟后再投喂`);
       }
     } else {
       showMsg('浏览器预览：获得 灵品·聚气丹');
@@ -279,8 +314,8 @@ $('btnFeed').addEventListener('click', async () => {
     await loadInfo();
   } catch (e) {
     console.error('[main] feed failed', e);
+    btn.disabled = false;
   }
-  btn.disabled = false;
 });
 
 (async () => {

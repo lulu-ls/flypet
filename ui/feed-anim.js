@@ -352,7 +352,8 @@ function step(anim, myToken) {
 
   // ---- 绘制宠物 ----
   if (genome && (air || phase === 'vanish')) {
-    const size = 70;
+    // 苍蝇体型比其他物种小 30%（与 pet/main 窗 dim 比例一致）
+    const size = genome.species === 'fly' ? 56.4 : 70;
     const fly = true;
     // 朝向：绕圈时沿切线方向；飞行时朝运动方向
     const dir = phase === 'circle'

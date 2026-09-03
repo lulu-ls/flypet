@@ -68,6 +68,11 @@
     cursor: pointer; transition: transform .05s;
   }
   .btn:active { transform: scale(.97); }
+  .btn:disabled {
+    filter: grayscale(.9); opacity: .55;
+    cursor: not-allowed;
+  }
+  .btn:disabled:active { transform: none; }
   .btn-feed { background: linear-gradient(180deg, #f6c453, #e8a33d); color: #fff; }
   .btn-feed:hover { filter: brightness(1.05); }
   .msg {

@@ -712,6 +712,9 @@ pub struct Insect {
     prev_pos: Vec2,
     /// 栖息朝向（落地时保留最后的飞行方向，避免停止后固定朝右/左）
     rest_heading: f32,
+    /// 平滑后的运动方向（单位向量，指数平滑）。供 heading() 使用：
+    /// 消除之字拐点的航向阶跃与慢速段的方向切换，飞行轨迹更连贯。
+    dir_sm: Vec2,
     /// 当前落点是否贴边（贴哪条边）。贴边时身体顺边、前端切侧视
     pub landing_edge: Option<Edge>,
     /// 当前惊扰程度 0~1（鼠标靠近速度映射），决定逃跑距离与随机性
@@ -809,6 +812,7 @@ impl Insect {
             seed,
             prev_pos: start,
             rest_heading: 0.0,
+            dir_sm: Vec2::new(1.0, 0.0),
             landing_edge: None,
             scare: 0.0,
             affinity_level: 1,
@@ -860,14 +864,16 @@ impl Insect {
         }
     }
 
-    /// 当前运动方向（世界坐标弧度）。飞行/滑翔 = 实时速度方向（含之字）；
+    /// 当前运动方向（世界坐标弧度）。飞行/滑翔 = 平滑后的速度方向；
     /// 栖息 = facing 映射（0 朝右 / π 朝左）。
     pub fn heading(&self) -> f32 {
         match self.state {
             State::Spawn | State::Flee | State::Glide | State::Feed | State::Approach => {
-                let d = self.pos.sub(self.prev_pos);
-                if d.len() > 0.5 {
-                    d.y.atan2(d.x)
+                // 平滑方向向量：旧实现「位移过小回退整体路径方向」会在慢速段
+                // （起飞 ramp / 变速低谷）与实时方向来回切换，表现为航向突然
+                // 左右甩头。指数平滑对拐点做圆滑过渡，全程无方向阶跃。
+                if self.dir_sm.len() > 1e-4 {
+                    self.dir_sm.y.atan2(self.dir_sm.x)
                 } else {
                     self.path.to.sub(self.path.from).y.atan2(
                         self.path.to.sub(self.path.from).x,
@@ -914,6 +920,41 @@ impl Insect {
     /// `still_secs`：光标已静止秒数（环境感知，主循环累加），用于亲近行为。
     /// `cursor_active`：光标当前是否在移动（赶走苍蝇用，主循环传 cursor_speed 阈值）。
     pub fn update(
+        &mut self,
+        cursor: Vec2,
+        screen: &Screen,
+        dt: f32,
+        scare: f32,
+        still_secs: f32,
+        cursor_active: bool,
+    ) -> Option<Pose> {
+        let pose = self.step(cursor, screen, dt, scare, still_secs, cursor_active);
+        self.note_heading(dt);
+        pose
+    }
+
+    /// 帧末刷新平滑方向向量（仅飞行态；栖息态朝向由 rest_heading 决定，
+    /// fidget 挪动不算运动方向）。指数平滑：拐点/变速处航向圆滑过渡，
+    /// 时间常数约 0.1s，肉眼无滞后感。
+    fn note_heading(&mut self, dt: f32) {
+        if self.state == State::Perch {
+            return;
+        }
+        let d = self.pos.sub(self.prev_pos);
+        let n = d.len();
+        if n > 0.5 {
+            let k = (dt * 10.0).clamp(0.0, 0.5);
+            let target = Vec2::new(d.x / n, d.y / n);
+            let mut s = self.dir_sm.lerp(target, k);
+            let l = s.len();
+            if l > 1e-4 {
+                s = Vec2::new(s.x / l, s.y / l);
+            }
+            self.dir_sm = s;
+        }
+    }
+
+    fn step(
         &mut self,
         cursor: Vec2,
         screen: &Screen,
@@ -1301,8 +1342,10 @@ impl Insect {
             };
             self.facing = if flip > 0.0 { 1 } else { -1 };
         } else {
-            let d = self.pos.sub(self.prev_pos);
-            self.rest_heading = if d.len() > 0.5 {
+            // 用平滑方向（与飞行中 heading() 同源）：末段慢速滑入时
+            // 位移过小会退化为整体路径方向，落地瞬间航向突变的观感
+            let d = self.dir_sm;
+            self.rest_heading = if d.len() > 1e-4 {
                 d.y.atan2(d.x)
             } else {
                 self.path.to.sub(self.path.from).y.atan2(
