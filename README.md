@@ -1,105 +1,78 @@
-# FlyPet
+<div align="center">
 
-桌面飞虫宠物：一只蝴蝶（后续支持苍蝇/蜜蜂/甲虫）停在桌面上，鼠标靠近就惊飞，飞行时转向跟随运动方向，滑翔落地后保持落地朝向。macOS / Windows 通用。
+# 🦋 FlyPet
 
-## 当前状态
+**一只住在桌面上的小飞虫**
 
-- **可运行的桌面宠物**（Tauri 2 + Rust 状态机 + Three.js WebGL 渲染蝴蝶 GLB 模型）
-- 蝴蝶模型：`ui/models/butterfly.glb`（Sketchfab 帝王蝶，CC-BY-4.0，3 段烘焙动画）
-- 动画映射：`|3` 待机轻微煽翅 / `|!` 起飞+飞行煽翅 / `|2` 滑行轻煽
-- 行为：栖息（等待）→ 鼠标靠近惊飞 → 飞行转向 → 滑翔 → 落地保持朝向
+鼠标靠近会惊飞 · 空闲时自己起落遛弯 · 喂食攒亲密度
 
-## 环境要求
+[![Release](https://img.shields.io/github/v/release/lulu-ls/flypet?label=%E4%B8%8B%E8%BD%BD&color=e8a33d)](https://github.com/lulu-ls/flypet/releases)
+[![Build](https://github.com/lulu-ls/flypet/actions/workflows/release.yml/badge.svg)](https://github.com/lulu-ls/flypet/actions/workflows/release.yml)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-blue)](#安装)
 
-- macOS（本项目在 macOS 开发验证；Windows 需配好 Tauri 环境）
-- [Rust 工具链](https://rustup.rs)（`rustc` + `cargo`）
-- Xcode Command Line Tools（macOS 编译必需）：
-  ```bash
-  xcode-select --install
-  ```
+</div>
 
-## 运行（开发）
+---
+
+## 这是什么
+
+FlyPet 是一只栖息在你屏幕上的桌面飞虫。它有自己的脾气和生活节奏——平时停在桌面上休息，你一靠近它就扑棱着翅膀逃走；喂它吃东西能攒亲密度，处得越熟它越愿意主动飞到你身边转圈表演。
+
+> 目前有 **蝴蝶** / **蜻蜓** / **苍蝇** 三位住户，各自有独立的性格参数和成长档案。
+
+## 特性
+
+- 🦋 **仿真的飞行行为** —— 螺旋起飞、之字巡航、减速滑翔、贴边停靠，每个物种的飞行风格都不同（蝴蝶飘忽、蜻蜓笔直疾飞、苍蝇急促抖拐）
+- 🖱️ **会躲人** —— 鼠标快速靠近会受惊起飞；静止不动够久，它反而会主动飞过来亲近你
+- 🍯 **投喂养成** —— 投喂随机抽出七品级食物（凡 → 神），攒亲密度解锁亲近行为，每次投喂有 10 分钟冷却
+- 📈 **独立成长** —— 亲密度、喂食统计、相处时长、存活时长，每个物种各自记账
+- 🪶 **轻量无感** —— 透明小窗常驻桌面，不抢焦点、不进任务栏
+
+## 安装
+
+到 [**Releases**](https://github.com/lulu-ls/flypet/releases) 下载对应平台安装包：
+
+| 平台 | 文件 |
+|------|------|
+| macOS（Apple Silicon / Intel 通用） | `FlyPet.app` 或 `.dmg` |
+| Windows | `FlyPet_x.x.x_x64-setup.exe` |
+
+> macOS 首次打开若提示无法验证开发者：系统设置 → 隐私与安全性 → 仍要打开。
+
+## 从源码构建
+
+**环境要求**：[Rust](https://rustup.rs)；macOS 需 Xcode Command Line Tools（`xcode-select --install`），Windows 需 MSVC 工具链与 WebView2。
 
 ```bash
-cd /Users/liuxs/github/fly/src-tauri
+# 开发运行
+cd src-tauri
 cargo run
+
+# 打包安装包
+cargo tauri build
 ```
 
-`Ctrl+C` 退出。改动 Rust 后重新 `cargo run`；改动前端（`ui/`）后重新 `cargo run`（会自动重新嵌入资源）。
+产物位于 `src-tauri/target/release/bundle/`。
 
-## 构建（打包 .app）
-
-```bash
-cd /Users/liuxs/github/fly
-npx @tauri-apps/cli@2 build
-```
-
-产物：`src-tauri/target/release/bundle/macos/FlyPet.app`
-
-安装到桌面：
-
-```bash
-open src-tauri/target/release/bundle/macos/FlyPet.app
-```
-
-## 直接运行已编译的调试版
-
-```bash
-cd /Users/liuxs/github/fly/src-tauri
-./target/debug/flypet
-```
-
-## 调试
-
-- **前端控制台**：托盘菜单 →「开发者工具」（打开 Web Inspector）
-- **Rust 日志**：`/tmp/flypet.log`（启动时输出 `POS x y pose`，状态切换时输出 `EVENT`）
-- **浏览器预览前端**（无 Tauri，内置演示模式，浅灰底便于观察）：
-  ```bash
-  cd /Users/liuxs/github/fly/ui
-  python3 -m http.server 8778
-  # 打开 http://localhost:8778/index.html
-  ```
-
-## 项目结构
-
-```
-fly/
-├── src-tauri/            # Rust 壳（Tauri 2）
-│   ├── src/
-│   │   ├── main.rs       # 主循环：指针 → 状态机 → 窗口移动 → state 事件
-│   │   ├── insect.rs     # 状态机 Spawn/Perch/Flee/Glide + 物种注册表
-│   │   ├── pointer.rs    # 全局光标
-│   │   └── platform.rs   # 工作区 / 缩放
-│   └── tauri.conf.json   # 140×140 透明置顶窗口
-├── ui/                   # 前端
-│   ├── index.html        # 入口（透明背景）
-│   ├── pet.js            # Three.js 渲染 + GLB 加载 + 动画映射 + state 驱动
-│   ├── vendor/           # three.js 本地化（离线可用）
-│   └── models/           # GLB 模型（打包自动嵌入）
-├── ui-lab/               # 行为实验室（v2/v3 引擎对比、外观调参）
-├── assets/models/        # 原始模型工作区（.fbx/.blend，不入 git）
-└── doc/                  # 设计/玩法/路线/疑难排查
-```
-
-## 技术要点
-
-- **透明 + 置顶 + 穿透**：`tauri.conf.json` 里 `transparent: true`（macOS 需 `macOSPrivateApi`）、`alwaysOnTop`、运行时 `set_ignore_cursor_events(true)`
-- **ESM 加载链**：three.js 已本地化到 `ui/vendor/`，`GLTFLoader`/`BufferGeometryUtils` 的相对导入已修正（见 `doc/troubleshooting.md` §2）
-- **GLB 加载**：用 `fetch → loader.parse`（同步解析），规避 WKWebView 对 XHR 流式的兼容问题（见 `doc/troubleshooting.md`）
-- **朝向**：Rust 下发实时速度方向 `heading`，前端平滑转向 + 转弯侧倾；落地保留最后飞行朝向
-
-## 已知限制
-
-- **透明窗口 + WebGL**：macOS WKWebView 对透明层 WebGL 合成支持不完整，当前在开发环境已验证可显示；若遇到空白，见 `doc/troubleshooting.md` §1（含回退 Canvas 2D 方案）
-- 苍蝇/蜜蜂/甲虫：模型接入中（动画命名规则见 `ui/pet.js` 的 `CLIP_RULES`）
+也可以直接推送 `v*` 格式的 tag，GitHub Actions 会自动构建 macOS + Windows 双平台安装包并生成 Release 草稿。
 
 ## 文档
 
-- 详细对比、状态机、坐标陷阱、体积预算见 [`doc/design.md`](doc/design.md)
-- 玩法系统（进化 / 喂食 / 亲密度 / 说话）见 [`doc/gameplay.md`](doc/gameplay.md)
-- 阶段划分见 [`doc/roadmap.md`](doc/roadmap.md)
-- 疑难排查记录见 [`doc/troubleshooting.md`](doc/troubleshooting.md)
-- 模型资源规范见 [`assets/models/README.md`](assets/models/README.md)
+想深入了解设计细节？看这里：
+
+- [设计文档](doc/design.md) —— 架构、状态机、坐标陷阱
+- [玩法设计](doc/gameplay.md) —— 进化 / 喂食 / 亲密度
+- [开发路线](doc/roadmap.md) —— 阶段规划
+- [疑难排查](doc/troubleshooting.md) —— 踩坑记录
 
 ## 联系方式
+
 QQ：11111111
+
+---
+
+<div align="center">
+
+如果 FlyPet 给你的桌面添了一点生气，点个 ⭐ 吧
+
+</div>
