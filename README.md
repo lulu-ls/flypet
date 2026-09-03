@@ -39,6 +39,26 @@ FlyPet 是一只栖息在你屏幕上的桌面飞虫。它有自己的脾气和�
 
 > macOS 首次打开若提示无法验证开发者：系统设置 → 隐私与安全性 → 仍要打开。
 
+## 常见问题
+
+**macOS 提示「Apple 无法验证“FlyPet”是否可能包含恶意软件」？**
+
+应用没有经过 Apple 公证（公证需要付费开发者账号）。解决方法：
+
+1. 点「取消」关闭弹窗（不要点「移到废纸篓」）
+2. 打开 **系统设置 → 隐私与安全性**
+3. 滚动到页面最下方，找到「“FlyPet”已被阻止」的提示，点击 **仍要打开**
+4. 弹窗里再点「打开」即可，之后不会再提示
+
+<details>
+<summary>命令行方式（备选）</summary>
+
+```bash
+sudo xattr -rd com.apple.quarantine /Applications/FlyPet.app
+```
+
+</details>
+
 ## 从源码构建
 
 **环境要求**：[Rust](https://rustup.rs)；macOS 需 Xcode Command Line Tools（`xcode-select --install`），Windows 需 MSVC 工具链与 WebView2。
