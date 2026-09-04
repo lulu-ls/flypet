@@ -9,7 +9,7 @@ mod pointer;
 mod profile;
 
 use insect::{Insect, Vec2};
-use platform::{screen_of, window_half};
+use platform::{all_screens, screen_at, screen_of, window_half};
 use serde::Serialize;
 use serde_json::json;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -645,7 +645,6 @@ fn add_duration(app: &AppHandle, sid: &str, secs: u64) {
 
 fn run_loop(app: AppHandle) {
     let win = app.get_webview_window("insect").expect("missing window");
-    let (half_w, half_h) = window_half(&win, 140.0, 160.0);
 
     let mut shown = false;
     let mut last = Instant::now();
@@ -661,6 +660,9 @@ fn run_loop(app: AppHandle) {
     let mut smooth_off_y = 0.0f32;
     // 相处时长累计（秒，当前物种）：满 60s 批量落盘，避免每帧写盘
     let mut dur_acc = 0.0f64;
+    // 多屏：所有显示器工作区缓存（2s 刷新一次，适配拔插屏/改分辨率）
+    let mut screens = all_screens(&win);
+    let mut screens_last = Instant::now();
 
     loop {
         // 暂停：冻在原地，重置计时防止恢复时 dt 跳变
@@ -675,16 +677,31 @@ fn run_loop(app: AppHandle) {
 
         // 先取光标/屏幕/缩放（AppKit 调用，必须在无 Rust 锁状态下进行，否则与主线程
         // 菜单回调等锁互锁 → macOS 转圈卡死）
-        let screen = screen_of(&win);
-        let scale_factor = win.scale_factor().unwrap_or(1.0);
+        // 多屏：定期刷新屏幕列表；宠物 pos 所在屏 = 本帧约束屏
+        if screens_last.elapsed() >= Duration::from_secs(2) {
+            screens = all_screens(&win);
+            screens_last = Instant::now();
+        }
         let cursor = pointer::global(&app).unwrap_or_else(|| {
             app.state::<Shared>().0.lock().unwrap().pos
         });
+        // 宠物 pos 所在屏 = 本帧约束屏（跨屏时窗口 clamp 自动跟过去）
+        let screen = *screen_at(&screens, app.state::<Shared>().0.lock().unwrap().pos);
+        let scale_factor = win.scale_factor().unwrap_or(1.0);
+        // 跨屏缩放：窗口所在屏的 scale 每帧重读，半宽半高跟着重算
+        let (half_w, half_h) = window_half(&win, 140.0, 160.0);
 
         // ---- 锁内：纯状态机计算（不碰任何窗口/AppKit API）----
         let frame = {
             let shared = app.state::<Shared>();
             let mut ins = shared.0.lock().unwrap();
+
+            // 拔屏兜底：栖息位置不在任何屏内（显示器被移除/分辨率变更）
+            // → 从就近屏重新起飞飞回来。飞行中不触发（跨屏途中 pos 可能在屏缝）。
+            if ins.is_perched() && !screens.iter().any(|s| s.contains(ins.pos)) {
+                let near = *screen_at(&screens, ins.pos);
+                ins.relaunch(cursor, &near, &screens);
+            }
 
             // 消费托盘「换物种」请求：relaunch 立即按新物种参数起飞
             let mut species_changed = false;
@@ -698,7 +715,7 @@ fn run_loop(app: AppHandle) {
                         dur_acc = 0.0;
                     }
                     if ins.set_species(&id) {
-                        ins.relaunch(cursor, &screen);
+                        ins.relaunch(cursor, &screen, &screens);
                         species_changed = true;
                         switched_to = Some(id);
                     } else if let Some(cur) = app.try_state::<CurrentSpecies>() {
@@ -713,7 +730,7 @@ fn run_loop(app: AppHandle) {
             if let Some(req) = app.try_state::<FeedRequest>() {
                 let mut slot = req.0.lock().unwrap();
                 if let Some(pos) = slot.take() {
-                    ins.start_feed(pos, &screen);
+                    ins.start_feed(pos, &screens);
                     feed_triggered = true;
                 }
             }
@@ -735,18 +752,22 @@ fn run_loop(app: AppHandle) {
             // 光标是否移动中（>12px/s 视为在动）：苍蝇「赶走」检测用
             let cursor_active = cursor_speed > 12.0;
 
-            let pose_changed = ins.update(cursor, &screen, dt, scare, still_secs, cursor_active)
+            let pose_changed = ins.update(cursor, &screen, &screens, dt, scare, still_secs, cursor_active)
                 .is_some()
                 || species_changed
                 || feed_triggered;
 
-            // 窗口目标位置（clamp 到工作区），纯计算
+            // 窗口中心锚定宠物（不做屏幕 clamp）：透明窗悬出屏幕边缘不可见，
+            // 虫子永远画在窗口中心 = 世界位置严格等于 pos。
+            // 旧方案「窗口 clamp 到所在屏」在落点贴边 / 跨屏时 clamp 边界切换，
+            // set_position 瞬跳 + off 低通滞后回摆 → 虫子闪现几十 px（降落阶段尤明显）。
+            // 锚定后 off 恒 ≈0，此类跳变整体消失；跨屏跟随天然无缝。
             let win_w = 140.0 * scale_factor as f32;
             let win_h = 160.0 * scale_factor as f32;
-            let wx = (ins.pos.x as f32 - half_w as f32).clamp(screen.x, screen.x + screen.w - win_w);
-            let wy = (ins.pos.y as f32 - half_h as f32).clamp(screen.y, screen.y + screen.h - win_h);
+            let wx = ins.pos.x as f32 - half_w as f32;
+            let wy = ins.pos.y as f32 - half_h as f32;
 
-            // 窗口内偏移平滑（低通）：窗口 clamp 到屏边时 off 突变，平滑后前端不会瞬移
+            // 窗口内偏移（历史机制保留，目标恒 ≈0；平滑收敛，前端无感）
             let k = (dt * 8.0).min(1.0);
             smooth_off_x += ((ins.pos.x - (wx + win_w * 0.5)) - smooth_off_x) * k;
             smooth_off_y += ((ins.pos.y - (wy + win_h * 0.5)) - smooth_off_y) * k;
