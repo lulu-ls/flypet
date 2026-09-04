@@ -91,7 +91,7 @@ const SPECIES_MODELS = {
     clipKeys: { perch: ['|3'], fly: ['|!', '4'], glide: ['|2', '5'] },
     // 蝴蝶：飘忽（慢转向、大横滚、轻俯仰）
     // turnRate：朝向往目标角速度（rad/s，慢速优雅）；bank：最大侧倾（rad，飞行动作）
-    turnRate: 2.2, bank: 0.9, pitchLean: 0.55, bobAmp: 0.012,
+    turnRate: 2.2, bank: 0.55, pitchLean: 0.4, bobAmp: 0.012,
     bobFreq: 2.6, turb: 0.5
   },
   dragonfly: {
@@ -192,6 +192,74 @@ function setPose(pose) {
    规避 macOS WKWebView 对 GLTFLoader 内部 XHR 加载的兼容问题。
    按当前物种加载对应模型；切物种时把旧模型/旧 mixer 整体丢弃。 */
 const loader = new GLTFLoader();
+
+// 裁掉动画 clip 末尾若干秒的帧——蝴蝶 GLB 的飞行动画末尾烘焙了「落回地面」
+// 姿势，LoopRepeat 每循环一次就突然下坠一下（「飞行中骤降」的元凶）。
+// 裁完按剩余帧重算 duration，循环无缝。
+//
+// ⚠️ 历史教训：手动切片 track.times/values 会引发整窗白屏（疑似 WKWebView
+// 进程崩溃，JS try/catch 拦不住进程崩溃）。必须用 three.js 官方
+// KeyframeTrack.trim()（原地按时间裁，内部正确处理 typed array）。
+// 若官方版仍白屏：把 CLIP_TAIL_TRIM 改回 0 并反馈。
+const CLIP_TAIL_TRIM = 0.12; // 秒
+function trimClipTail(clip, trimSec) {
+  if (trimSec <= 0 || !clip.tracks.length || clip.duration <= trimSec + 0.5) return false;
+  const end = clip.duration - trimSec;
+  try {
+    for (const track of clip.tracks) {
+      track.trim(0, end); // 官方原地裁 keyframes：保留 [0, end]
+    }
+  } catch (e) {
+    console.error('[flypet] 动画裁剪失败（忽略）:', e);
+    return false;
+  }
+  let maxT = 0;
+  for (const track of clip.tracks) {
+    const last = track.times[track.times.length - 1];
+    if (last > maxT) maxT = last;
+  }
+  if (maxT <= 0) return false;
+  clip.duration = maxT;
+  console.log(`[flypet] 已裁剪动画「${clip.name}」末尾 ${trimSec}s（剔除落地帧）`);
+  return true;
+}
+
+// 方案 A：剥离飞行动画里的「整体位移」轨道（根骨骼 translation），只留姿态。
+// 诊断结论（GLB 解析）：metarig|! 里 SPINE_00.translation 烘焙了整只蝴蝶的
+// 升高-前进-降落（Z 17→230、Y 4.4→8.9），其余位移全是静态绑定值。
+// 动画带根位移而我们的逻辑也控制高度 → 叠加冲出界面、动画降落+逻辑降落双重下坠。
+// 按「某轴振幅 ≥ 阈值」泛化识别（兼容其他模型的同类根节点），用新建 AnimationClip
+// 替换（不改原 clip 数据，避免 WKWebView 白屏）。
+function stripBodyMotion(clip, minAmplitude) {
+  const kept = [];
+  let dropped = null;
+  for (const track of clip.tracks) {
+    const isPosition = track.name.endsWith('.position') && track.values;
+    if (isPosition) {
+      const size = track.getValueSize();
+      let amp = 0;
+      for (let c = 0; c < size; c++) {
+        let lo = Infinity, hi = -Infinity;
+        for (let i = c; i < track.values.length; i += size) {
+          const v = track.values[i];
+          if (v < lo) lo = v;
+          if (v > hi) hi = v;
+        }
+        if (hi - lo > amp) amp = hi - lo;
+      }
+      if (amp >= minAmplitude) {
+        dropped = track.name;
+        continue; // 丢：根位移交给外部逻辑
+      }
+    }
+    kept.push(track);
+  }
+  if (!dropped || !kept.length) return clip;
+  const stripped = new THREE.AnimationClip(clip.name, clip.duration, kept);
+  console.log(`[flypet] 已剥离「${clip.name}」整体位移轨道 ${dropped}（高度交由逻辑控制）`);
+  return stripped;
+}
+
 function setupModel(gltf, speciesId) {
   const root = gltf.scene;
 
@@ -252,6 +320,24 @@ function setupModel(gltf, speciesId) {
   const names = clips.map(c => c.name || '(未命名)').join(', ');
   console.log(`[flypet] ${speciesId} 模型加载完成 动画:`, names || '无');
   if (!clips.length) console.warn('[flypet] 模型无烘焙动画，仅有静态展示');
+  // 方案 A：飞行动画剥离整体位移轨道（蝴蝶 SPINE_00.translation 带
+  // 升高-前进-降落）→ 身体位移完全交给 Rust 高度逻辑，只留振翅姿态。
+  // 剥离后动画末段「落回地面」的根因（根位移回落到位）也一并消失。
+  // 全部 try/catch：任何失败都不能打断模型加载（宁可带病也不白屏）
+  const flySpec = SPECIES_MODELS[speciesId] || MODEL_DEFAULT;
+  let flyClip = findClip((flySpec.clipKeys && flySpec.clipKeys.fly) || CLIP_RULES.fly);
+  if (flyClip) {
+    try {
+      const stripped = stripBodyMotion(flyClip, 1.5); // 阈值：1.5 模型单位振幅
+      if (stripped !== flyClip) {
+        const idx = clips.indexOf(flyClip);
+        if (idx >= 0) clips[idx] = stripped;
+        flyClip = stripped;
+      }
+    } catch (e) { console.error('[flypet] 动画剥离失败（忽略）:', e); }
+    try { trimClipTail(flyClip, CLIP_TAIL_TRIM); }
+    catch (e) { console.error('[flypet] 动画裁剪失败（忽略）:', e); }
+  }
   // 加载完成切到当前姿态：切换发生在飞行中则直接播飞行动画
   setPose(pose === 'perch' ? 'perch' : (pose === 'glide' ? 'glide' : 'fly'));
 }
@@ -290,6 +376,8 @@ let curHeading = 0;       // 当前朝向（平滑趋近 heading）
 let roll = 0;             // 侧倾角（转弯时）
 let targetAlt = 0;               // 目标高度（场景单位，来自 Rust alt/60）
 let curAlt = 0;                  // 渲染用平滑高度
+let prevTargetAlt = 0;           // 上一帧目标高度（算变化率用）
+let altVel = 0;                  // 目标高度变化率（平滑后，前馈补偿低通滞后）
 let pitch = 0;                   // 俯仰（爬升抬头 / 俯冲低头）
 let curShadowOpacity = 0.35;     // 阴影透明度（平滑缓动，避免闪烁）
 
@@ -394,8 +482,20 @@ function loop() {
 
   // 整体运动（永远代码驱动：位置/朝向/浮动）
   poseT += dt;
-  // 高度平滑（跟随 Rust alt，但带缓动避免跳变）
-  curAlt += (targetAlt - curAlt) * Math.min(1, dt * 5);
+  // 高度追踪 = 低通(5/s) + 变化率前馈（抵消匀速滞后）。
+  // 前馈之后模型精确贴目标，若 Rust 目标本身骤降（包络收尾/滑翔切入，
+  // 斜率可达 300px/s），贴住 = 屏幕上「突然掉一截」。所以再叠加
+  // 视觉垂直速率上限：下降限速让一切骤降变成平滑滑落，爬升不限这么死。
+  const altVelInst = (targetAlt - prevTargetAlt) / Math.max(dt, 1e-3);
+  altVel += (altVelInst - altVel) * Math.min(1, dt * 10);
+  prevTargetAlt = targetAlt;
+  const altTarget = targetAlt + altVel / 5;
+  let altDelta = (altTarget - curAlt) * Math.min(1, dt * 5);
+  const maxDown = 0.7 * dt; // 最大下降 ~42px/s（场景 1 单位 = 60px）
+  const maxUp = 2.5 * dt;
+  if (altDelta < -maxDown) altDelta = -maxDown;
+  else if (altDelta > maxUp) altDelta = maxUp;
+  curAlt += altDelta;
   const air = pose === 'flee' || pose === 'glide' || pose === 'spawn' || pose === 'feed' || pose === 'approach';
   // 浮动：飞行=低频小幅起伏（身体稳定，翅膀动画已表现拍翅），栖息=缓慢呼吸感（幅度按物种）
   const bob = air
@@ -438,8 +538,10 @@ function loop() {
     if (pose === 'flee' || pose === 'spawn' || pose === 'approach') {
       // 用目标高度的变化率估计爬升/俯冲（目标来自 Rust alt，每 33ms 才跳一次；
       // 直接对 curAlt 微分会把平滑滞后误判成俯冲）。
-      const altRate = (targetAlt - curAlt) * 5; // 近似 dAlt/dt
-      pitch += (0.10 + altRate * 0.25 - pitch) * Math.min(1, dt * 6);
+      // altRate 必须 clamp：curAlt 平滑滞后让爬升段 altRate 峰值 ~3.3，
+      // 不限的话 pitch 飙到 ~0.9rad（53°），翅面转向相机 → 爬升时模型「变大」。
+      const altRate = Math.max(-1.5, Math.min(1.5, (targetAlt - curAlt) * 5));
+      pitch += (0.10 + altRate * 0.08 - pitch) * Math.min(1, dt * 6);
       root.rotation.x = -pitch * (sp.pitchLean / 0.55);
     } else if (pose === 'glide') {
       pitch += (0.06 - pitch) * Math.min(1, dt * 6);
@@ -498,10 +600,9 @@ function loop() {
   camElev += (tgtElev - camElev) * Math.min(1, dt * 2.2);
   camYaw  += (tgtYaw - camYaw) * Math.min(1, dt * 2.2);
   const ce = camElev;
-  // 视线焦点 = 模型水平位置（部分跟随，水平由 Rust 窗口 clamp 负责）+
-  // 高度 100% 跟随 curAlt：蝴蝶升降时相机同步平移，模型始终保持在画面内。
-  // curAlt 本身是低通平滑值（dt*5），不会把高频起伏传给相机；bob 不进焦点
-  // （模型绕焦点小幅浮动是真实运动，幅度小不会出画）。
+  // 视线焦点 = 模型水平位置（部分跟随）+ 模型真实高度 curAlt+bob。
+  // 相机到模型距离恒为 CAM_DIST（球面围绕模型转），任何高度下模型
+  // 视觉尺寸恒定 —— 高度变化不再带来「变近变大」。
   const focus = new THREE.Vector3(
     (root ? root.position.x : 0) * 0.25,
     (root ? curAlt : 0),
