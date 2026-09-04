@@ -444,6 +444,12 @@ fn main() {
                 let _ = window.hide();
             }
         })
+        // 单实例：托盘/启动图标/二次运行只复用已有进程，绝不新开宠物
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(w) = app.get_webview_window("insect") {
+                let _ = w.show();
+            }
+        }))
         .setup(|app| {
             let win = app
                 .get_webview_window("insect")
