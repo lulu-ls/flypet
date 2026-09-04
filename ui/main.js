@@ -5,7 +5,10 @@ import { GLTFLoader } from './vendor/GLTFLoader.js';
 const isTauri = !!window.__TAURI__;
 const $ = (id) => document.getElementById(id);
 
-const SPECIES_LABEL = { butterfly: '蝴蝶', dragonfly: '蜻蜓', fly: '苍蝇', spider: '蜘蛛' };
+const SPECIES_LABEL = {
+  butterfly: '蝴蝶', dragonfly: '蜻蜓', fly: '苍蝇', spider: '蜘蛛',
+  bee: '蜜蜂', mantis: '螳螂', longhorn: '天牛'
+};
 
 const RARITY_META = {
   fan:  { label: '凡品', ico: '🍂' },
