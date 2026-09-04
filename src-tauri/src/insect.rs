@@ -41,6 +41,19 @@ impl Edge {
 }
 
 /// 随机选一条边缘（等概率）
+/// 跨屏落点目标屏选择（多屏支持）：
+/// 桌面宠物的铁律：**宠物永远待在用户正在使用的屏**（光标所在屏）。
+/// - 起飞落点一律选在光标所在屏：用户切到副屏干活，宠物跟着飞过去；
+///   用户回主屏，宠物也回主屏。绝不会滞留在用户看不到的屏上
+///   （旧行为 25%「遛弯」随机跨屏 → 宠物消失在副屏 = 「桌面啥都没有」）。
+/// - 屏内遛弯由 pick_landing 负责（落点仍在屏内随机），跨屏只跟随光标。
+fn pick_screen<'a>(screens: &'a [Screen], _cur: &'a Screen, cursor: Vec2, _scared: bool, _rng: &mut Rng) -> &'a Screen {
+    if screens.len() <= 1 {
+        return &screens[0];
+    }
+    screen_at(screens, cursor)
+}
+
 fn pick_edge(rng: &mut Rng) -> Edge {
     let edges = [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right];
     edges[(rng.next_f32() * 4.0) as usize % 4]
@@ -129,6 +142,8 @@ pub struct PathStyle {
     pub alt_wobble: f32,
     /// 飞行中段速度随机（倍率）：忽快忽慢的变速感
     pub speed_wobble: f32,
+    /// 距落点多近切入滑翔（物理像素，阶段 2：按距离而非时间比例）
+    pub glide_dist: f32,
 }
 
 impl Default for PathStyle {
@@ -140,6 +155,7 @@ impl Default for PathStyle {
             turn_bias: 0.5,
             alt_wobble: 0.12,
             speed_wobble: 0.18,
+            glide_dist: 120.0,
         }
     }
 }
@@ -411,36 +427,50 @@ fn build_flight_path(
         cum[i + 1] = cum[i] + len / (peak_speed * speeds[i]);
     }
     let total = cum.last().copied().unwrap_or(0.0).max(0.001);
-    // 高度表：起点 0 → 起飞后爬升 → 中段 cruise ± alt_wobble → 落点 0
-    let mut alts = vec![0.0f32; n];
-    for i in 1..n - 1 {
-        let tt = i as f32 / (n - 1) as f32;
-        let wave = (tt * std::f32::consts::PI * 2.0 * (path.zigzag.max(1) as f32)).sin();
-        let cruise = path.cruise_alt * (1.0 + wave * path.alt_wobble);
-        // 起飞 0→巡航（前 25%），降落巡航→0（后 20%）
-        let env = (tt / 0.25).min(1.0).min(((1.0 - tt) / 0.2).min(1.0));
-        alts[i] = cruise * env.max(0.0);
-    }
-    alts[0] = 0.0;
-    alts[n - 1] = 0.0;
 
     FlightPath {
         pts: sm,
         cum,
         speeds,
-        alts,
+        style: *path,
         total,
         from,
         to,
     }
 }
 
-/// 一条完整的飞行路径：航点 + 弧长时间表 + 高度表
+/// 高度曲线（阶段 1 重构）：高度只依赖飞行时间进度 t∈[0,1]，与航点 index 解绑。
+///
+/// 旧方案 alts[i] 按航点序号（≈空间均匀）生成，但推进是弧长按时间 + 段内变速，
+/// 空间均匀 ≠ 时间均匀：末段若飞得快，几十 px 的下降被压进零点几秒 = 「突然掉落」。
+/// 改成纯时间曲线后，无论路径快慢：
+///   0~0.25   easeOut 爬升到巡航
+///   0.25~0.65 巡航 ± 正弦起伏
+///   0.65~1.0  easeIn 平滑降到 0（先慢后快，坡度连续）
+fn height_curve(t: f32, cruise: f32, wobble: f32, zigzag: i32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    let wave = (t * std::f32::consts::TAU * zigzag.max(1) as f32).sin();
+    let cruise = cruise * (1.0 + wave * wobble);
+    if t < 0.25 {
+        // easeOut 爬升：起步快、到顶缓，无折角
+        let p = t / 0.25;
+        let e = 1.0 - (1.0 - p) * (1.0 - p);
+        cruise * e
+    } else if t < 0.65 {
+        cruise
+    } else {
+        // easeIn 下降：起步缓、贴地收，与 Glide 的高度曲线（线性降）衔接顺
+        let p = (t - 0.65) / 0.35;
+        cruise * (1.0 - p * p)
+    }
+}
+
+/// 一条完整的飞行路径：航点 + 弧长时间表 + 路径风格（高度由 height_curve 按时间生成）
 struct FlightPath {
     pts: Vec<Vec2>,
     cum: Vec<f32>,
     speeds: Vec<f32>,
-    alts: Vec<f32>,
+    style: PathStyle,
     total: f32,
     from: Vec2,
     to: Vec2,
@@ -457,13 +487,8 @@ impl FlightPath {
         }
         let seg_t = ((tt - self.cum[i]) / (self.cum[i + 1] - self.cum[i]).max(0.001)).clamp(0.0, 1.0);
         let pos = self.pts[i].lerp(self.pts[i + 1], seg_t);
-        let alt = self.alts[i] + (self.alts[i + 1] - self.alts[i]) * seg_t;
+        let alt = height_curve(t, self.style.cruise_alt, self.style.alt_wobble, self.style.zigzag);
         (pos, alt, self.speeds[i])
-    }
-
-    /// 末段是否进入滑翔（低空贴地）
-    fn glide(&self, t: f32) -> bool {
-        t > 0.8
     }
 }
 
@@ -479,6 +504,7 @@ impl Movement for StraightFly {
             turn_bias: 0.85,     // 每段 ±15°~51° 交替偏拐（急促抖拐）
             alt_wobble: 0.22,    // 高度忽高忽低
             speed_wobble: 0.38,  // 冲刺-减速节奏（家蝇标志性的 dart-pause）
+            glide_dist: 110.0,
         }
     }
     // 苍蝇天性贴人：自发飞行约一半概率落在光标附近环带
@@ -492,12 +518,13 @@ struct DriftFly;
 impl Movement for DriftFly {
     fn path_style(&self) -> PathStyle {
         PathStyle {
-            cruise_alt: 46.0,
+            cruise_alt: 38.0,
             takeoff_spiral: 2.1, // 受惊后大角度螺旋转向，逃窜感
             zigzag: 3,           // 3 段之字，忽左忽右
             turn_bias: 0.95,     // 每段转向偏离 ±0.95 rad（约 ±54°）
             alt_wobble: 0.22,    // 高度明显起伏
             speed_wobble: 0.30,  // 忽快忽慢
+            glide_dist: 150.0,   // 舒展滑翔：距落点 150px 切入
         }
     }
     fn idle_limit(&self, rng: &mut Rng, base: f32) -> f32 {
@@ -536,6 +563,7 @@ impl Movement for CrawlFly {
             turn_bias: 0.2,
             alt_wobble: 0.06,
             speed_wobble: 0.08,
+            glide_dist: 60.0,
         }
     }
     fn fidget_chance(&self) -> f32 {
@@ -555,6 +583,7 @@ impl Movement for DartFly {
             turn_bias: 0.3,
             alt_wobble: 0.08,
             speed_wobble: 0.10,
+            glide_dist: 80.0,   // 悬停式减速：近距离才切
         }
     }
     fn idle_limit(&self, rng: &mut Rng, base: f32) -> f32 {
@@ -593,7 +622,7 @@ pub struct SpeciesDef {
     pub disabled: bool,
 }
 
-pub const SPECIES: [SpeciesDef; 4] = [
+pub const SPECIES: [SpeciesDef; 7] = [
     SpeciesDef {
         id: "butterfly",
         label: "蝴蝶",
@@ -654,6 +683,52 @@ pub const SPECIES: [SpeciesDef; 4] = [
         movement: &CrawlFly,
         disabled: true,
     },
+    // ---- 占位物种：模型未就绪，托盘置灰；参数是占位初稿，接入模型时再调 ----
+    SpeciesDef {
+        id: "bee",
+        label: "蜜蜂（开发中）",
+        params: Params {
+            flee_radius: 100.0,
+            safe_radius: 240.0,
+            peak_speed: 420.0, // 蜂类高频振翅、速度偏快
+            flee_boost: 1.3,
+            cooldown: 0.3,
+            spawn_offset: 18.0,
+            idle_base: 7.0,
+        },
+        movement: &DartFly,
+        disabled: true,
+    },
+    SpeciesDef {
+        id: "mantis",
+        label: "螳螂（开发中）",
+        params: Params {
+            flee_radius: 90.0,
+            safe_radius: 240.0,
+            peak_speed: 240.0, // 爬行类，慢
+            flee_boost: 1.1,
+            cooldown: 0.5,
+            spawn_offset: 18.0,
+            idle_base: 20.0, // 螳螂爱静止守候
+        },
+        movement: &CrawlFly,
+        disabled: true,
+    },
+    SpeciesDef {
+        id: "longhorn",
+        label: "天牛（开发中）",
+        params: Params {
+            flee_radius: 100.0,
+            safe_radius: 240.0,
+            peak_speed: 220.0,
+            flee_boost: 1.1,
+            cooldown: 0.5,
+            spawn_offset: 18.0,
+            idle_base: 18.0,
+        },
+        movement: &CrawlFly,
+        disabled: true,
+    },
 ];
 
 pub fn species_by_id(id: &str) -> Option<&'static SpeciesDef> {
@@ -687,12 +762,10 @@ pub struct Insect {
     state: State,
     /// 当前飞行路径（之字 + 高度 + 变速），Spawn/Flee/Glide 共用
     path: FlightPath,
-    /// 沿路径进度 0~1（弧长参数化）
+    /// 沿路径进度 0~1（弧长参数化 = 时间进度）。高度唯一来源：height_curve(t)
     t: f32,
-    /// 当前高度（物理像素，地面 0）。飞行时=路径采样；滑翔=缓降；栖息=0
+    /// 当前高度（物理像素，地面 0）。飞行/滑翔全程 = height_curve(t)；栖息=0
     pub alt: f32,
-    /// 起飞瞬间高度（切入滑翔时从当前高度缓降）
-    start_alt: f32,
     /// 减速接近段：切入初速（px/s）
     glide_v0: f32,
     /// 减速接近段：飞行方向（单位向量，切入位置 → 落点）
@@ -702,6 +775,10 @@ pub struct Insect {
     glide_dec: f32,
     /// 减速接近段计时（秒）
     glide_t: f32,
+    /// 滑翔切入位置（解析位移的起点，防积分漂移/冲过落点）
+    glide_from: Vec2,
+    /// 滑翔切入时距落点的距离（px，位移上限）
+    glide_dist: f32,
     idle: f32,
     idle_limit: f32,
     cooldown: f32,
@@ -791,19 +868,20 @@ impl Insect {
                 pts: vec![start, start],
                 cum: vec![0.0, 1.0],
                 speeds: vec![1.0],
-                alts: vec![0.0, 0.0],
+                style: def.movement.path_style(),
                 total: 1.0,
                 from: start,
                 to: start,
             },
             t: 0.0,
             alt: 0.0,
-            start_alt: 0.0,
             glide_v0: 0.0,
             glide_dir_x: 1.0,
             glide_dir_y: 0.0,
             glide_dec: 0.0,
             glide_t: 0.0,
+            glide_from: start,
+            glide_dist: 0.0,
             idle: 0.0,
             idle_limit: 10.0,
             cooldown: 0.0,
@@ -841,7 +919,9 @@ impl Insect {
             feed_angular: 1.6,
             feed_total_dur: 6.0,
         };
-        ins.take_off(cursor, screen, true);
+        // 出生在光标所在屏（单屏列表：出生不跨屏）
+        let screens = [*screen];
+        ins.take_off(cursor, screen, &screens, true);
         ins
     }
 
@@ -923,12 +1003,13 @@ impl Insect {
         &mut self,
         cursor: Vec2,
         screen: &Screen,
+        screens: &[Screen],
         dt: f32,
         scare: f32,
         still_secs: f32,
         cursor_active: bool,
     ) -> Option<Pose> {
-        let pose = self.step(cursor, screen, dt, scare, still_secs, cursor_active);
+        let pose = self.step(cursor, screen, screens, dt, scare, still_secs, cursor_active);
         self.note_heading(dt);
         pose
     }
@@ -958,6 +1039,7 @@ impl Insect {
         &mut self,
         cursor: Vec2,
         screen: &Screen,
+        screens: &[Screen],
         dt: f32,
         scare: f32,
         still_secs: f32,
@@ -976,35 +1058,51 @@ impl Insect {
                 self.prev_pos = self.pos;
                 self.pos = pos;
                 self.alt = alt;
-                // 减速接近：末段切入 Glide（蝴蝶滑翔 / 蜻蜓悬停式减速）
+                // 减速接近：距落点不足 glide_dist 时切入 Glide（阶段 2：按距离，
+                // 不按时间比例——时间切点会因变速在空间上忽早忽晚）。
+                // t > 0.3 防出生点恰在落点附近时秒切滑翔；之字中段短暂靠近
+                // 落点不误触发（有 0.3 时间下限 + 距离双条件）。
                 if self.state == State::Flee
                     && self.movement().has_glide()
-                    && self.path.glide(self.t)
+                    && self.t > 0.3
                 {
-                    self.start_alt = self.alt; // 从当前高度开始缓降
-                    // 物理匀减速模型：v0 = 当前路径段速度（不会像 easeOut 路径
-                    // 映射那样初速爆表），方向朝落点（路径末段本就朝落点收敛，
-                    // 转向角小）。减速度 = v0²/(2D) 恰好落在落点、末速≈0。
-                    let sp_now = _sp.max(0.2); // sample 返回的段速度倍率
-                    let v0 = (self.species.params.peak_speed * sp_now).min(2000.0);
                     let d = self.pos.dist(self.path.to);
-                    if d < 8.0 || v0 < 60.0 {
-                        // 已贴落点 / 速度过低：直接落地，不进入滑翔
+                    if d < 8.0 {
+                        // 已贴落点：直接落地
                         self.land();
                         return Some(Pose::Perch);
                     }
+                    if d < self.path.style.glide_dist {
+                        // 物理匀减速模型：v0 = 当前路径段速度（不会像 easeOut 路径
+                        // 映射那样初速爆表），方向朝落点（路径末段本就朝落点收敛，
+                        // 转向角小）。减速度 = v0²/(2D) 恰好落在落点、末速≈0。
+                        // 高度不在此接管——Glide 只控制水平与姿态，垂直始终由
+                        // height_curve(t) 单一来源驱动（阶段 3 重构）。
+                        let sp_now = _sp.max(0.2); // sample 返回的段速度倍率
+                        let v0 = (self.species.params.peak_speed * sp_now).min(2000.0);
+                        if v0 < 60.0 {
+                            // 速度过低：直接落地，不进入滑翔
+                            self.land();
+                            return Some(Pose::Perch);
+                        }
                     self.glide_v0 = v0;
                     self.glide_dir_x = (self.path.to.x - self.pos.x) / d;
                     self.glide_dir_y = (self.path.to.y - self.pos.y) / d;
+                    // dec 下限 150：滑翔减速距离 = v0²/(2·dec) ≤ v0²/300。
+                    // 下限再低（如 60）会让滑翔拖成长距离贴地溜，观感冗长；
+                    // 150 下短程滑翔即停（停点距落点不足时收翅，不冲过）。
                     self.glide_dec = (v0 * v0 / (2.0 * d)).clamp(150.0, 6000.0);
                     self.glide_t = 0.0;
-                    self.state = State::Glide;
-                    return Some(Pose::Glide);
+                    self.glide_from = self.pos;
+                    self.glide_dist = d;
+                        self.state = State::Glide;
+                        return Some(Pose::Glide);
+                    }
                 }
                 if self.t >= 1.0 {
                     // 到达落点：鼠标还在附近 → 不落地，继续飞（连飞）
                     if self.pos.dist(cursor) < p.flee_radius {
-                        self.take_off(cursor, screen, true);
+                        self.take_off(cursor, screen, screens, true);
                         return Some(Pose::Flee);
                     }
                     self.land();
@@ -1013,25 +1111,34 @@ impl Insect {
                 None
             }
             State::Glide => {
-                // 减速接近段：物理匀减速（切入 v0 → 0），方向 = 切入速度方向。
-                // 减速距离按投影算，速度降到 ~0 即停（落点附近）。每帧位移
-                // 线性收敛 —— 高频振翅的「减速接近停止」。
+                // 阶段 3 重构（FlightController 分权）：
+                // - 水平：Glide 接管——解析匀减速（v0·t − dec·t²/2）clamp 到落点
+                // - 垂直：Glide 不接管——高度始终 = height_curve(t)，与 Flee
+                //   同一条时间曲线。切入瞬间垂直速度天然连续（同一函数），
+                //   不存在「两个控制器抢高度」。
+                // - 收尾：t≥1 时高度曲线恰为 0，水平到位即落地；水平提前到齐
+                //   就原地扑翅随曲线缓降（滑翔贴地感）。
                 self.glide_t += dt;
+                self.t = (self.t + dt / self.path.total).min(1.0);
                 let v = (self.glide_v0 - self.glide_dec * self.glide_t).max(0.0);
-                let vx = self.glide_dir_x * v;
-                let vy = self.glide_dir_y * v;
+                let traveled = (self.glide_v0 * self.glide_t
+                    - 0.5 * self.glide_dec * self.glide_t * self.glide_t)
+                    .clamp(0.0, self.glide_dist);
                 self.prev_pos = self.pos;
-                self.pos = Vec2::new(self.pos.x + vx * dt, self.pos.y + vy * dt);
-                // 高度从 start_alt 缓降到地面（滑翔贴地感）
-                let e_h = (self.glide_t / 0.4).min(1.0);
-                self.alt = self.start_alt * (1.0 - e_h);
-                // 停止：速度趋零（匀减速到终点），或已贴近落点
-                let near_land = self.pos.dist(self.path.to) < 10.0;
-                let done = v <= 2.0 || near_land;
+                self.pos = Vec2::new(
+                    self.glide_from.x + self.glide_dir_x * traveled,
+                    self.glide_from.y + self.glide_dir_y * traveled,
+                );
+                // 垂直：唯一高度源（时间曲线），与 Flee 无缝衔接
+                let (_, curve_alt, _) = self.path.sample(self.t);
+                self.alt = curve_alt;
+                // 收尾：水平耗尽/到位，且时间走完（高度曲线此时恰为 0）
+                let arrived = self.glide_dist - traveled <= 1.5;
+                let done = (v <= 2.0 || arrived) && self.t >= 1.0;
                 if done {
                     // 到达落点：鼠标还在附近 → 不落地，继续飞（连飞）
                     if self.pos.dist(cursor) < p.flee_radius {
-                        self.take_off(cursor, screen, true);
+                        self.take_off(cursor, screen, screens, true);
                         return Some(Pose::Flee);
                     }
                     self.land();
@@ -1230,6 +1337,11 @@ impl Insect {
                 self.idle += dt;
                 let near = self.pos.dist(cursor) < p.flee_radius;
                 let is_fly = self.species.id == "fly";
+                // 异屏回归：用户已切到别的屏，宠物不能赖在这屏不动
+                // （用户视角 = 宠物消失了）。停留超过 1.5s 就自发飞回光标屏。
+                let cs = screen_at(screens, cursor);
+                let off_screen = !(screen.x == cs.x && screen.y == cs.y && screen.w == cs.w && screen.h == cs.h);
+                let return_home = off_screen && self.idle >= 1.5;
 
                 // 苍蝇「赶走」检测：主动停在光标旁（亲近/表演落地），光标一动即
                 // 惊飞，进入 3 分钟冷却（期间不亲近、不表演）。普通自发飞行落点
@@ -1240,7 +1352,7 @@ impl Insect {
                     && self.pos.dist(cursor) < 140.0
                     && cursor_active
                 {
-                    self.take_off(cursor, screen, true);
+                    self.take_off(cursor, screen, screens, true);
                     self.shoo_cd = 180.0;
                     self.shoo_armed = false;
                     self.approach_cd = self.approach_cd.max(20.0);
@@ -1261,12 +1373,12 @@ impl Insect {
                             if still_secs >= 30.0 {
                                 // 静止 30s：表演绕飞（必触发一次）
                                 let rule = ApproachRule { still_secs: 30.0, chance: 1.0, dist: 70.0 };
-                                self.start_approach(cursor, screen, rule, true);
+                                self.start_approach(cursor, screens, rule, true);
                                 return Some(Pose::Approach);
                             } else if self.rng.next_f32() < dt / 25.0 {
                                 // 随机靠近（平均 ~25s 一次机会）：普通飞近停靠
                                 let rule = ApproachRule { still_secs: 0.0, chance: 1.0, dist: 90.0 };
-                                self.start_approach(cursor, screen, rule, false);
+                                self.start_approach(cursor, screens, rule, false);
                                 return Some(Pose::Approach);
                             }
                             // 表演门槛临近（30s）：待命等表演，别先 idle 飞走
@@ -1279,7 +1391,7 @@ impl Insect {
                             let d_to_cursor = self.pos.dist(cursor);
                             if d_to_cursor > rule.dist + 40.0 {
                                 if still_secs >= rule.still_secs && self.rng.next_f32() < rule.chance {
-                                    self.start_approach(cursor, screen, rule, false);
+                                    self.start_approach(cursor, screens, rule, false);
                                     return Some(Pose::Approach);
                                 }
                                 // 未掷中/未到门槛：待命（不因 idle 飞走）
@@ -1288,10 +1400,15 @@ impl Insect {
                         }
                     }
                 }
-                // 起飞条件：光标进入警戒半径（冷却已过），或停留超时（§5.1）。
+                // 起飞条件：光标进入警戒半径（冷却已过），或停留超时（§5.1），
+                // 或用户已切到别的屏（异屏回归，不等 idle_limit——用户看不到）。
                 // 亲近待命中不因 idle 飞走（等鼠标静止攒够 / 掷骰）。
-                if (near && self.cooldown <= 0.0) || (self.idle >= self.idle_limit && !approach_pending) {
-                    self.take_off(cursor, screen, near);
+                if (near && self.cooldown <= 0.0)
+                    || (self.idle >= self.idle_limit && !approach_pending)
+                    || return_home
+                {
+                    // 异屏回归按普通起飞（不惊飞）：scared=false 落点会倾向光标屏
+                    self.take_off(cursor, screen, screens, near && !off_screen);
                     return Some(Pose::Flee);
                 }
                 // fidget：低概率小幅挪动，增加活感（§5.1 / §5.2 fidgetChance）
@@ -1360,14 +1477,16 @@ impl Insect {
         self.fidget = None; // 防御：确保落地不带任何残留插值（双保险）
     }
 
-    fn take_off(&mut self, cursor: Vec2, screen: &Screen, scared: bool) {
+    fn take_off(&mut self, cursor: Vec2, screen: &Screen, screens: &[Screen], scared: bool) {
         // 清除进行中的 fidget：否则落地恢复插值时 pos 会闪现回起飞点附近
         self.fidget = None;
+        // 多屏：挑落点目标屏——优先保证宠物待在光标所在屏（用户身边）
+        let target_screen = pick_screen(screens, screen, cursor, scared, &mut self.rng);
         let landing = self.movement().pick_landing(
             &mut self.rng,
             self.pos,
             cursor,
-            screen,
+            target_screen,
             scared,
             self.scare,
             &self.species.params,
@@ -1383,6 +1502,9 @@ impl Insect {
         } else {
             1.0
         };
+        // 路径中途点 clamp 到「起飞屏 ∪ 落点屏」的并集包围盒：
+        // 跨屏飞行允许途经屏间空隙，但不跑出两屏之外（单屏时等于本屏，行为不变）
+        let span = Screen::span(screen, target_screen);
         self.path = build_flight_path(
             self.pos,
             to,
@@ -1390,20 +1512,19 @@ impl Insect {
             scared,
             boost,
             self.species.params.peak_speed,
-            screen,
+            &span,
             &self.movement().path_style(),
             &mut self.rng,
         );
         self.t = 0.0;
         self.alt = 0.0;
-        self.start_alt = 0.0;
         self.facing = if to.x >= self.pos.x { 1 } else { -1 };
         self.state = State::Flee;
     }
 
     /// 强制起飞（托盘切换物种后调用）：让宠物从旧姿态立刻以新物种的参数起飞
-    pub fn relaunch(&mut self, cursor: Vec2, screen: &Screen) {
-        self.take_off(cursor, screen, false);
+    pub fn relaunch(&mut self, cursor: Vec2, screen: &Screen, screens: &[Screen]) {
+        self.take_off(cursor, screen, screens, false);
     }
 
     /// 开始一段进食滑翔：从当前位置向 feed_dir 方向滑翔一段随机距离（2~3 秒）
@@ -1420,15 +1541,19 @@ impl Insect {
         self.feed_t = 0.0;
     }
 
-    /// 投喂触发：生成飞向投食点的路径，切到 Feed 状态（先飞过去，再左右往复进食）
-    pub fn start_feed(&mut self, pos: Vec2, screen: &Screen) {
+    /// 投喂触发：生成飞向投食点的路径，切到 Feed 状态（先飞过去，再左右往复进食）。
+    /// 多屏：投食点在光标所在屏，宠物可能停在别的屏——路径中途点 clamp 到
+    /// 「宠物屏 ∪ 投食屏」的并集包围盒，允许跨屏赴宴。
+    pub fn start_feed(&mut self, pos: Vec2, screens: &[Screen]) {
         // 清除进行中的 fidget（同 take_off，防落地闪现）
         self.fidget = None;
+        let target_screen = screen_at(screens, pos);
+        let pet_screen = screen_at(screens, self.pos);
         // 投食点 clamp 到工作区内部（留边距，避免贴边飞出）
         let margin = 24.0;
         let target = Vec2::new(
-            pos.x.clamp(screen.x + margin, screen.x + screen.w - margin),
-            pos.y.clamp(screen.y + margin, screen.y + screen.h - margin),
+            pos.x.clamp(target_screen.x + margin, target_screen.x + target_screen.w - margin),
+            pos.y.clamp(target_screen.y + margin, target_screen.y + target_screen.h - margin),
         );
         self.feed_target = target;
         self.feed_phase = 0;
@@ -1436,6 +1561,7 @@ impl Insect {
         // 进食是新落点（普通栖息），清掉旧落点的贴边标记，避免进食完沿用旧贴边
         self.landing_edge = None;
         // 飞向投食点：不惊飞、正常速度、之字巡航
+        let span = Screen::span(pet_screen, target_screen);
         self.path = build_flight_path(
             self.pos,
             target,
@@ -1443,21 +1569,24 @@ impl Insect {
             false,
             1.0,
             self.species.params.peak_speed,
-            screen,
+            &span,
             &self.movement().path_style(),
             &mut self.rng,
         );
         self.t = 0.0;
         self.alt = 0.0;
-        self.start_alt = 0.0;
         self.facing = if target.x >= self.pos.x { 1 } else { -1 };
         self.state = State::Feed;
     }
 
     /// 亲近行为：飞到光标旁停靠。`bother=true` 时目标为光标正上方附近，
     /// 到达后进入绕飞表演再落旁边（苍蝇静止 30s 触发）；false 则直接落旁边。
-    fn start_approach(&mut self, cursor: Vec2, screen: &Screen, rule: ApproachRule, bother: bool) {
+    /// 多屏：目标 clamp 在光标所在屏；宠物可能停在别的屏，路径中途点
+    /// clamp 到「宠物屏 ∪ 光标屏」的并集包围盒。
+    fn start_approach(&mut self, cursor: Vec2, screens: &[Screen], rule: ApproachRule, bother: bool) {
         let margin = 24.0;
+        let cursor_screen = screen_at(screens, cursor);
+        let pet_screen = screen_at(screens, self.pos);
         self.approach_bother = bother;
         self.approach_phase = 0;
         let toward = self.pos.sub(cursor); // 光标 → 虫
@@ -1475,7 +1604,7 @@ impl Insect {
             cursor.y + uy * tgt_dist,
         );
         for i in 1..8 {
-            if screen.contains(target) {
+            if cursor_screen.contains(target) {
                 break;
             }
             let a = i as f32 * std::f32::consts::FRAC_PI_4;
@@ -1485,11 +1614,12 @@ impl Insect {
             );
         }
         target = Vec2::new(
-            target.x.clamp(screen.x + margin, screen.x + screen.w - margin),
-            target.y.clamp(screen.y + margin, screen.y + screen.h - margin),
+            target.x.clamp(cursor_screen.x + margin, cursor_screen.x + cursor_screen.w - margin),
+            target.y.clamp(cursor_screen.y + margin, cursor_screen.y + cursor_screen.h - margin),
         );
         self.landing_edge = None; // 亲近停靠是普通栖息，非贴边
         // 正常巡航飞过去（scared=false），比 Flee 温和
+        let span = Screen::span(pet_screen, cursor_screen);
         self.path = build_flight_path(
             self.pos,
             target,
@@ -1497,13 +1627,12 @@ impl Insect {
             false,
             1.0,
             self.species.params.peak_speed * 0.8, // 略慢：亲近不是逃命
-            screen,
+            &span,
             &self.movement().path_style(),
             &mut self.rng,
         );
         self.t = 0.0;
         self.alt = 0.0;
-        self.start_alt = 0.0;
         self.facing = if target.x >= self.pos.x { 1 } else { -1 };
         // 冷却：这次亲近后一段时间内不再触发（防鼠标静止时反复飞）
         self.approach_cd = if bother { 60.0 } else { 20.0 };
@@ -1511,4 +1640,4 @@ impl Insect {
     }
 }
 
-use crate::platform::Screen;
+use crate::platform::{screen_at, Screen};
